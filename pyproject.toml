@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "haze"
+version = "0.1.0"
+description = "Anonymous encrypted P2P chat — Haze Protocol"
+requires-python = ">=3.11"
+dependencies = [
+    "PyQt6>=6.6.0",
+    "stem>=1.8.2",
+    "cryptography>=42.0.0",
+    "python-socks[asyncio]>=2.4.4",
+]
+
+[project.scripts]
+haze = "haze.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+haze = ["assets/*.png", "assets/*.svg"]

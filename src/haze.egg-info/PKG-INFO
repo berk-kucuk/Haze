@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: haze
+Version: 0.1.0
+Summary: Anonymous encrypted P2P chat — Haze Protocol
+Requires-Python: >=3.11
+Requires-Dist: PyQt6>=6.6.0
+Requires-Dist: stem>=1.8.2
+Requires-Dist: cryptography>=42.0.0
+Requires-Dist: python-socks[asyncio]>=2.4.4

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Haze
+Comment=Anonymous encrypted P2P chat — Haze Protocol
+Exec=haze
+Icon=haze
+Terminal=false
+Categories=Network;Chat;Security;
+Keywords=tor;anonymous;chat;privacy;haze;
+StartupWMClass=Haze
