@@ -1,4 +1,5 @@
 # Haze
+[![Website](https://img.shields.io/badge/Website-haze.berkkucukk.com-0f172a?style=flat-square&logo=googlechrome&logoColor=white)](https://haze.berkkucukk.com)
 
 **Anonymous · Encrypted · No Trace**
 
