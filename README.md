@@ -134,10 +134,8 @@ The hidden service is created as an ephemeral service (`detached=False`). The pr
 ### Arch Linux (recommended)
 
 ```bash
-sudo pacman -S tor
-git clone <repository-url>
-cd haze
-bash installer/install.sh
+paru -S haze
+yay -S haze
 ```
 
 ### Ubuntu / Debian
