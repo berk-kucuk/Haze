@@ -7,3 +7,7 @@ Requires-Dist: PyQt6>=6.6.0
 Requires-Dist: stem>=1.8.2
 Requires-Dist: cryptography>=42.0.0
 Requires-Dist: python-socks[asyncio]>=2.4.4
+Requires-Dist: qrcode>=8.0
+Requires-Dist: sounddevice>=0.4.6
+Requires-Dist: numpy>=1.26
+Requires-Dist: aiohttp>=3.9

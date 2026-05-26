@@ -7,7 +7,7 @@ import threading
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QWidget, QProgressBar, QMessageBox,
-    QGraphicsOpacityEffect,
+    QPlainTextEdit, QFrame, QGraphicsOpacityEffect,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import (
@@ -78,13 +78,14 @@ class SetupDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Haze")
-        self.setFixedSize(480, 640)
+        self.setFixedSize(480, 760)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         self.mode: str = ""
         self.nick: str = ""
         self.onion_url: str = ""
+        self.session_password: str = ""
         self.tor: TorController = TorController()
 
         self._build_ui()
@@ -202,6 +203,18 @@ class SetupDialog(QDialog):
         self._onion_label.hide()
         self._onion_input.hide()
 
+        # ── Session password ──
+        bg_layout.addSpacing(18)
+        self._pw_label = QLabel(t("session_password"))
+        self._pw_label.setObjectName("sectionTitle")
+        self._pw_input = QLineEdit()
+        self._pw_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pw_input.setFixedHeight(48)
+        bg_layout.addWidget(self._pw_label)
+        bg_layout.addSpacing(6)
+        bg_layout.addWidget(self._pw_input)
+        self._update_pw_placeholder()
+
         bg_layout.addSpacing(26)
 
         # ── Connect button ──
@@ -214,28 +227,37 @@ class SetupDialog(QDialog):
 
         bg_layout.addSpacing(14)
 
-        # ── Progress / status — fixed-height container so layout never shifts ──
-        status_box = QWidget()
-        status_box.setFixedHeight(60)
-        status_box.setStyleSheet("background: transparent;")
-        status_lay = QVBoxLayout(status_box)
-        status_lay.setContentsMargins(0, 0, 0, 0)
-        status_lay.setSpacing(8)
-
+        # ── Progress bar ──
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 0)
         self._progress_bar.setFixedHeight(2)
         self._progress_bar.hide()
-        status_lay.addWidget(self._progress_bar)
+        bg_layout.addWidget(self._progress_bar)
+        bg_layout.addSpacing(6)
 
+        # ── Tor log area — transparent, no frame, no box ──
+        self._log_area = QPlainTextEdit()
+        self._log_area.setReadOnly(True)
+        self._log_area.setFixedHeight(110)
+        self._log_area.setFrameShape(QFrame.Shape.NoFrame)
+        self._log_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._log_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._log_area.setStyleSheet(
+            "QPlainTextEdit { background: transparent; border: none;"
+            " color: #888888; font-family: 'Courier New', monospace; font-size: 10px; }"
+        )
+        self._log_area.viewport().setStyleSheet("background: transparent;")
+        bg_layout.addWidget(self._log_area)
+        bg_layout.addSpacing(4)
+
+        # ── One-line status for errors / ready state ──
         self._status_label = QLabel("")
         self._status_label.setObjectName("statusMsg")
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._status_label.setWordWrap(True)
-        self._status_label.setFixedHeight(46)
-        status_lay.addWidget(self._status_label)
+        self._status_label.setFixedHeight(28)
+        bg_layout.addWidget(self._status_label)
 
-        bg_layout.addWidget(status_box)
         bg_layout.addStretch()
 
         self._warn = QLabel(t("tor_warning"))
@@ -273,14 +295,22 @@ class SetupDialog(QDialog):
         self._nick_input.setPlaceholderText(t("placeholder_nick"))
         self._onion_label.setText(t("onion_address"))
         self._onion_input.setPlaceholderText(t("placeholder_onion"))
+        self._pw_label.setText(t("session_password"))
+        self._update_pw_placeholder()
         self._connect_btn.setText(t("connect"))
         self._warn.setText(t("tor_warning"))
-        if self._status_label.text():
+        if self._status_label.text() and self._log_area.document().isEmpty():
             self._status_label.setText(t("starting_tor"))
 
     # ------------------------------------------------------------------
     # Mode selection
     # ------------------------------------------------------------------
+
+    def _update_pw_placeholder(self) -> None:
+        if self.mode == "host":
+            self._pw_input.setPlaceholderText(t("session_password_host"))
+        else:
+            self._pw_input.setPlaceholderText(t("session_password_join"))
 
     def _select_mode(self, mode: str) -> None:
         self.mode = mode
@@ -304,6 +334,7 @@ class SetupDialog(QDialog):
             self._host_btn.setStyleSheet(_idle)
             self._onion_label.show()
             self._onion_input.show()
+        self._update_pw_placeholder()
         self._connect_btn.setEnabled(True)
 
     # ------------------------------------------------------------------
@@ -333,11 +364,13 @@ class SetupDialog(QDialog):
             self.onion_url = onion
 
         self.nick = nick
+        self.session_password = self._pw_input.text().strip()
         self._connect_btn.setEnabled(False)
         self._host_btn.setEnabled(False)
         self._join_btn.setEnabled(False)
         self._progress_bar.show()
         self._status_label.setText(t("starting_tor"))
+        self._log_area.clear()
 
         worker = _TorWorker(self.tor, self.mode)
         worker.progress.connect(self._on_progress)
@@ -349,11 +382,20 @@ class SetupDialog(QDialog):
         self._thread.start()
 
     def _on_progress(self, msg: str) -> None:
-        self._status_label.setText(msg)
+        self._log_area.appendPlainText(msg)
+        # Auto-scroll to latest line
+        sb = self._log_area.verticalScrollBar()
+        sb.setValue(sb.maximum())
+        self._status_label.setText(msg.split(":")[0] if ":" in msg else msg)
 
     def _on_ready(self) -> None:
         self._progress_bar.hide()
+        self._log_area.appendPlainText("✓ Ready.")
+        sb = self._log_area.verticalScrollBar()
+        sb.setValue(sb.maximum())
         self._status_label.setText(t("ready"))
+        if self.mode == "host":
+            self.onion_url = self.tor.onion_address or ""
         self.accept()
 
     def _on_error(self, msg: str) -> None:
@@ -361,5 +403,6 @@ class SetupDialog(QDialog):
         self._connect_btn.setEnabled(True)
         self._host_btn.setEnabled(True)
         self._join_btn.setEnabled(True)
+        self._log_area.appendPlainText(f"✗ {msg}")
         self._status_label.setText(f"{t('error')}: {msg}")
         QMessageBox.critical(self, t("connection_error"), msg)

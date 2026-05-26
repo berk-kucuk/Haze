@@ -12,6 +12,10 @@ dependencies = [
     "stem>=1.8.2",
     "cryptography>=42.0.0",
     "python-socks[asyncio]>=2.4.4",
+    "qrcode>=8.0",
+    "sounddevice>=0.4.6",
+    "numpy>=1.26",
+    "aiohttp>=3.9",
 ]
 
 [project.scripts]

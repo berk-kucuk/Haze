@@ -20,6 +20,10 @@ class TorController:
         self._socks_port = random.randint(19050, 19150)
         self._control_port = random.randint(19200, 19350)
         self._local_port = random.randint(50000, 59999)
+        # HTTP port for the web interface (separate from TCP chat port)
+        self._http_port = random.randint(50000, 59999)
+        while self._http_port == self._local_port:
+            self._http_port = random.randint(50000, 59999)
 
     @property
     def socks_port(self) -> int:
@@ -28,6 +32,10 @@ class TorController:
     @property
     def local_port(self) -> int:
         return self._local_port
+
+    @property
+    def http_port(self) -> int:
+        return self._http_port
 
     @property
     def onion_address(self) -> str | None:
@@ -68,14 +76,35 @@ class TorController:
         if self._controller is None:
             raise RuntimeError("Tor controller bağlı değil.")
 
+        # Virtual port 80  → HTTP web interface (Tor Browser)
+        # Virtual port 5222 → native TCP chat protocol
         response = self._controller.create_ephemeral_hidden_service(
-            {80: self._local_port},
+            {80: self._http_port, 5222: self._local_port},
             await_publication=True,
             detached=False,
         )
         self._service_id = response.service_id
         self._onion_address = f"{response.service_id}.onion"
         return self._onion_address
+
+    def create_additional_hidden_service(self, local_port: int, http_port: int) -> tuple[str, str]:
+        """Create another ephemeral hidden service. Returns (onion_address, service_id)."""
+        if self._controller is None:
+            raise RuntimeError("Tor controller bağlı değil.")
+        response = self._controller.create_ephemeral_hidden_service(
+            {80: http_port, 5222: local_port},
+            await_publication=True,
+            detached=False,
+        )
+        return f"{response.service_id}.onion", response.service_id
+
+    def remove_service(self, service_id: str) -> None:
+        """Remove a specific hidden service by service ID."""
+        if self._controller:
+            try:
+                self._controller.remove_ephemeral_hidden_service(service_id)
+            except Exception:
+                pass
 
     def remove_hidden_service(self) -> None:
         if self._controller and self._service_id:
@@ -85,6 +114,12 @@ class TorController:
                 pass
             self._service_id = None
             self._onion_address = None
+
+    def renew_circuit(self) -> None:
+        """Send NEWNYM signal to rotate Tor circuits. Existing sessions stay alive."""
+        if self._controller:
+            import stem
+            self._controller.signal(stem.Signal.NEWNYM)
 
     def cleanup(self) -> None:
         """Full cleanup: hidden service → controller → Tor process → data dir."""

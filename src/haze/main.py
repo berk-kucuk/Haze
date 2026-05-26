@@ -43,6 +43,7 @@ def main() -> None:
         nick=dialog.nick,
         tor=dialog.tor,
         onion_url=dialog.onion_url,
+        session_password=dialog.session_password,
     )
     window.show()
 

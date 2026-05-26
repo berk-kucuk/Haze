@@ -1,5 +1,7 @@
+README.md
 pyproject.toml
 src/haze/__init__.py
+src/haze/__main__.py
 src/haze/i18n.py
 src/haze/main.py
 src/haze.egg-info/PKG-INFO
@@ -17,8 +19,12 @@ src/haze/network/__init__.py
 src/haze/network/client.py
 src/haze/network/protocol.py
 src/haze/network/server.py
+src/haze/network/web_server.py
 src/haze/secure/__init__.py
 src/haze/secure/memory.py
+src/haze/storage/__init__.py
+src/haze/storage/settings.py
+src/haze/storage/vault.py
 src/haze/tor/__init__.py
 src/haze/tor/controller.py
 src/haze/ui/__init__.py

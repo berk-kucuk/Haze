@@ -12,10 +12,18 @@ After handshake all frames are encrypted envelopes.
 """
 
 import asyncio
+import base64
+import hashlib
 from typing import Callable
 
 from ..crypto.e2e import SessionCrypto
 from . import protocol as proto
+
+
+def _hash_password(password: str) -> str:
+    if not password:
+        return ""
+    return hashlib.sha256(b"haze-session-v1:" + password.encode()).hexdigest()
 
 
 class ChatServer:
@@ -24,10 +32,12 @@ class ChatServer:
         host_nick: str,
         local_port: int,
         on_event: Callable[[dict], None],
+        session_password: str = "",
     ) -> None:
         self._host_nick = host_nick
         self._local_port = local_port
-        self._on_event = on_event  # called in asyncio thread, emits Qt signal
+        self._on_event = on_event
+        self._session_password_hash = _hash_password(session_password)
 
         self._crypto = SessionCrypto()
         self._crypto.generate_session_key()
@@ -86,16 +96,63 @@ class ChatServer:
             await self._disconnect_client(nick)
 
     # ------------------------------------------------------------------
-    # Host sends a message (no TCP roundtrip needed)
+    # Host sends messages
     # ------------------------------------------------------------------
 
-    async def send_chat(self, content: str) -> None:
-        payload = proto.make_chat(self._host_nick, content)
+    async def send_chat(self, content: str, msg_id: str | None = None) -> None:
+        payload = proto.make_chat(self._host_nick, content, msg_id)
         self._on_event(payload)
         await self._broadcast(payload)
 
     async def send_panic(self) -> None:
         payload = proto.make_panic(self._host_nick)
+        self._on_event(payload)
+        await self._broadcast(payload)
+
+    async def send_file(self, file_id: str, filename: str, mime: str, data: bytes) -> None:
+        chunks = [data[i:i + proto.CHUNK_SIZE] for i in range(0, len(data), proto.CHUNK_SIZE)]
+        await self._broadcast(proto.make_file_start(
+            self._host_nick, file_id, filename, mime, len(data), len(chunks)
+        ))
+        for i, chunk in enumerate(chunks):
+            await self._broadcast(proto.make_file_chunk(
+                self._host_nick, file_id, i, base64.b64encode(chunk).decode()
+            ))
+        await self._broadcast(proto.make_file_end(self._host_nick, file_id))
+
+    async def kick_client(self, nick: str) -> None:
+        entry = self._clients.get(nick)
+        if not entry:
+            return
+        _, writer, conn_crypto = entry
+        try:
+            await self._send_encrypted(writer, conn_crypto, proto.make_kicked())
+        except Exception:
+            pass
+        await self._disconnect_client(nick)
+
+    async def send_typing(self, is_typing: bool) -> None:
+        payload = proto.make_typing(self._host_nick, is_typing)
+        await self._broadcast(payload)
+
+    async def receive_web_chat(self, nick: str, content: str, msg_id: str) -> None:
+        """Accept a message from a web client, notify Qt and forward to TCP clients."""
+        payload = proto.make_chat(nick, content, msg_id)
+        self._on_event(payload)
+        await self._broadcast(payload)
+
+    async def receive_web_typing(self, nick: str, is_typing: bool) -> None:
+        payload = proto.make_typing(nick, is_typing)
+        self._on_event(payload)
+        await self._broadcast(payload)
+
+    async def send_delete(self, msg_id: str) -> None:
+        payload = proto.make_delete(self._host_nick, msg_id)
+        self._on_event(payload)
+        await self._broadcast(payload)
+
+    async def send_edit(self, msg_id: str, content: str) -> None:
+        payload = proto.make_edit(self._host_nick, msg_id, content)
         self._on_event(payload)
         await self._broadcast(payload)
 
@@ -118,6 +175,12 @@ class ChatServer:
             client_pub = hello["public_key"]
             nick = self._sanitize_nick(hello.get("nick", "anonymous"))
 
+            # Step 1b: password check (if session is protected)
+            if self._session_password_hash:
+                if hello.get("password_hash", "") != self._session_password_hash:
+                    await proto.send_msg(writer, {"type": "auth_failed"})
+                    return
+
             # Deduplicate nick
             if nick in self._clients or nick == self._host_nick:
                 nick = f"{nick}_{len(self._clients)+1}"
@@ -130,7 +193,6 @@ class ChatServer:
                 "nonce": wrapped["nonce"],
                 "ciphertext": wrapped["ciphertext"],
             }
-            # conn_crypto needs the session key to encrypt further messages
             conn_crypto.set_session_key(bytes(self._crypto._session_key))
             await proto.send_msg(writer, welcome)
 
@@ -155,12 +217,35 @@ class ChatServer:
                 msg_type = inner.get("type")
 
                 if msg_type == "chat":
-                    inner["nick"] = nick  # trust server-side nick
+                    inner["nick"] = nick
                     self._on_event(inner)
                     await self._broadcast(inner, exclude_nick=nick)
 
+                elif msg_type in ("file_start", "file_chunk", "file_end"):
+                    inner["nick"] = nick
+                    self._on_event(inner)
+                    await self._broadcast(inner, exclude_nick=nick)
+
+                elif msg_type == "typing":
+                    inner["nick"] = nick
+                    self._on_event(inner)
+                    await self._broadcast(inner, exclude_nick=nick)
+
+                elif msg_type == "delete":
+                    inner["nick"] = nick
+                    self._on_event(inner)
+                    await self._broadcast(inner, exclude_nick=nick)
+
+                elif msg_type == "edit":
+                    inner["nick"] = nick
+                    self._on_event(inner)
+                    await self._broadcast(inner, exclude_nick=nick)
+
+                elif msg_type == "ping":
+                    pong = proto.make_pong(inner.get("ts", 0.0))
+                    await self._send_encrypted(writer, conn_crypto, pong)
+
                 elif msg_type == "leave":
-                    # Client is gracefully leaving — disconnect broadcasts to others
                     await self._disconnect_client(nick)
                     return
 

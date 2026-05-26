@@ -61,7 +61,9 @@ echo "  ██╔══██║██╔══██║ ███╔╝  ██
 echo "  ██║  ██║██║  ██║███████╗███████╗"
 echo "  ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝"
 echo -e "${NC}"
-echo -e "${BOLD}Anonymous encrypted P2P chat — Haze Protocol${NC}"
+echo -e "${BOLD}Anonymous · Encrypted · No Trace — Haze Protocol${NC}"
+echo -e "  E2E encrypted · Tor hidden services · Session passwords"
+echo -e "  Web access · Circuit renewal · Multi-session · Secret Vault"
 echo ""
 
 # ── Dependency checks ────────────────────────────────────────────────
@@ -139,14 +141,14 @@ ICON_PATH="$PIXMAP_DIR/$APP.png"
 cat > "$DESKTOP_DIR/$APP.desktop" <<DESKTOP_EOF
 [Desktop Entry]
 Name=Haze
-Comment=Anonymous encrypted P2P chat — Haze Protocol
+Comment=Anonymous encrypted P2P chat over Tor — E2E encrypted, no logs
 Exec=$BIN_DIR/$APP
 Icon=$ICON_PATH
 Terminal=false
 Type=Application
-Categories=Network;Chat;
+Categories=Network;Chat;Security;
 StartupWMClass=Haze
-Keywords=tor;anonymous;chat;encrypted;p2p;
+Keywords=tor;anonymous;chat;encrypted;p2p;privacy;security;haze;
 DESKTOP_EOF
 
 # ── Refresh all caches ───────────────────────────────────────────────
