@@ -10,14 +10,20 @@ Haze is a peer-to-peer group chat application that routes all traffic through th
 
 <table>
   <tr>
-    <td align="center"><b>Login</b></td>
+    <td align="center"><b>Login Host</b></td>
+    <td align="center"><b>Login Join</b></td>
+  </tr>
+  <tr>
+    <td><img src="screenshots/login_host.png" width="280"/></td>
+    <td><img src="screenshots/login_join.png" width="280"/></td>
+  </tr>
+  <tr>
     <td align="center"><b>Chat</b></td>
     <td align="center"><b>Protocol Info</b></td>
   </tr>
   <tr>
-    <td><img src="screenshots/login.png" width="280"/></td>
-    <td><img src="screenshots/ui.png" width="280"/></td>
-    <td><img src="screenshots/protocol.png" width="280"/></td>
+    <td><img src="screenshots/ui.png" width="480"/></td>
+    <td><img src="screenshots/protocol.png" width="480"/></td>
   </tr>
 </table>
 
