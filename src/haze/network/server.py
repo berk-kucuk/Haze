@@ -1,0 +1,407 @@
+"""
+Host-mode asyncio TCP server.
+
+Handshake sequence per client:
+  C→S  {"type": "hello", "public_key": "<b64>", "nick": "<nick>"}
+  S→C  {"type": "welcome", "public_key": "<b64>", "nonce": "<b64>", "ciphertext": "<b64>"}
+       (ciphertext = session_key wrapped with ECDH-derived key)
+  S→C  encrypted({"type": "userlist", "users": [...]})
+  S→all encrypted({"type": "join", "nick": "<nick>"})
+
+After handshake all frames are encrypted envelopes.
+"""
+
+import asyncio
+import base64
+import hashlib
+import hmac
+import itertools
+from typing import Callable
+
+from ..crypto.e2e import SessionCrypto
+from ..crypto import webe2e
+from . import protocol as proto
+
+# Outgoing send-queue priorities — lower sorts first (asyncio.PriorityQueue).
+# A large file/GIF broadcast to one client must never delay a chat/control
+# frame to that (or any other) client by more than the time to finish
+# sending one chunk already in flight.
+_PRIO_CONTROL = 0
+_PRIO_FILE = 1
+_FILE_TYPES = frozenset({"file_start", "file_chunk", "file_end"})
+
+# Sentinel enqueued to make a per-client writer loop exit after flushing
+# whatever was ahead of it.
+_SHUTDOWN = object()
+
+
+def _priority_for(payload: dict) -> int:
+    return _PRIO_FILE if payload.get("type") in _FILE_TYPES else _PRIO_CONTROL
+
+
+def _hash_password(password: str) -> str:
+    if not password:
+        return ""
+    return hashlib.sha256(b"haze-session-v1:" + password.encode()).hexdigest()
+
+
+class ChatServer:
+    def __init__(
+        self,
+        host_nick: str,
+        local_port: int,
+        on_event: Callable[[dict], None],
+        session_password: str = "",
+    ) -> None:
+        self._host_nick = host_nick
+        self._local_port = local_port
+        self._on_event = on_event
+        self._session_password_hash = _hash_password(session_password)
+
+        self._crypto = SessionCrypto()
+        self._crypto.generate_session_key()
+
+        # nick → (reader, writer, per-conn crypto)
+        self._clients: dict[str, tuple[asyncio.StreamReader, asyncio.StreamWriter, SessionCrypto]] = {}
+        self._server: asyncio.AbstractServer | None = None
+
+        # Per-client outgoing queue + dedicated writer task — see _priority_for.
+        self._client_queues: dict[str, asyncio.PriorityQueue] = {}
+        self._client_writer_tasks: dict[str, asyncio.Task] = {}
+        self._send_seq = itertools.count()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def start(self) -> None:
+        self._server = await asyncio.start_server(
+            self._handle_client,
+            host="127.0.0.1",
+            port=self._local_port,
+        )
+
+    async def stop(self) -> None:
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+        for task in self._client_writer_tasks.values():
+            task.cancel()
+        self._client_writer_tasks.clear()
+        self._client_queues.clear()
+        for _nick, (_reader, writer, _crypto) in list(self._clients.items()):
+            try:
+                writer.close()
+            except Exception:
+                pass
+        self._clients.clear()
+        self._crypto.wipe()
+
+    # ------------------------------------------------------------------
+    # Send helpers
+    # ------------------------------------------------------------------
+    #
+    # Each client has its own outgoing queue drained by a dedicated writer
+    # task (_client_writer_loop), so exactly one coroutine ever writes to a
+    # given client's socket — concurrent writes would interleave their bytes
+    # and corrupt the length-prefixed framing. _broadcast only enqueues;
+    # _priority_for ensures a chat/control frame to a client always jumps
+    # ahead of that client's still-pending file/GIF chunks.
+
+    async def _send_encrypted(
+        self,
+        writer: asyncio.StreamWriter,
+        conn_crypto: SessionCrypto,
+        payload: dict,
+    ) -> None:
+        envelope = conn_crypto.encrypt(payload)
+        await proto.send_msg(writer, envelope)
+
+    def _enqueue_to(self, nick: str, payload: dict) -> None:
+        queue = self._client_queues.get(nick)
+        if queue is not None:
+            queue.put_nowait((_priority_for(payload), next(self._send_seq), payload))
+
+    async def _broadcast(self, payload: dict, exclude_nick: str | None = None) -> None:
+        """Queue payload for delivery to every connected client."""
+        for nick in list(self._clients.keys()):
+            if nick == exclude_nick:
+                continue
+            self._enqueue_to(nick, payload)
+
+    async def _client_writer_loop(self, nick: str) -> None:
+        queue = self._client_queues[nick]
+        try:
+            while True:
+                _, _, payload = await queue.get()
+                if payload is _SHUTDOWN:
+                    return
+                entry = self._clients.get(nick)
+                if not entry:
+                    return
+                _, writer, conn_crypto = entry
+                try:
+                    await self._send_encrypted(writer, conn_crypto, payload)
+                except Exception:
+                    break  # send failed — fall through and disconnect
+        except asyncio.CancelledError:
+            return
+        if nick in self._clients:
+            await self._disconnect_client(nick)
+
+    # ------------------------------------------------------------------
+    # Host sends messages
+    # ------------------------------------------------------------------
+
+    async def send_chat(self, content: str, msg_id: str | None = None,
+                        reply_to_nick: str | None = None, reply_to_content: str | None = None,
+                        disappear_secs: int = 0) -> None:
+        payload = proto.make_chat(self._host_nick, content, msg_id, reply_to_nick, reply_to_content,
+                                  disappear_secs)
+        self._on_event(payload)
+        await self._broadcast(payload)
+
+    async def send_panic(self) -> None:
+        payload = proto.make_panic(self._host_nick)
+        self._on_event(payload)
+        await self._broadcast(payload)
+
+    async def send_file(self, file_id: str, filename: str, mime: str, data: bytes) -> None:
+        chunks = [data[i:i + proto.CHUNK_SIZE] for i in range(0, len(data), proto.CHUNK_SIZE)]
+        await self._broadcast(proto.make_file_start(
+            self._host_nick, file_id, filename, mime, len(data), len(chunks)
+        ))
+        for i, chunk in enumerate(chunks):
+            await self._broadcast(proto.make_file_chunk(
+                self._host_nick, file_id, i, base64.b64encode(chunk).decode()
+            ))
+        await self._broadcast(proto.make_file_end(self._host_nick, file_id))
+
+    async def kick_client(self, nick: str) -> None:
+        if nick not in self._clients:
+            return
+        # Route "kicked" through the same per-client queue as everything
+        # else (rather than a direct write) — the writer task may be
+        # mid-send on a queued frame, and a second concurrent write to the
+        # same socket would corrupt the framing.
+        self._enqueue_to(nick, proto.make_kicked())
+        queue = self._client_queues.get(nick)
+        writer_task = self._client_writer_tasks.get(nick)
+        if queue is not None:
+            queue.put_nowait((_PRIO_CONTROL, next(self._send_seq), _SHUTDOWN))
+        if writer_task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(writer_task), timeout=2.0)
+            except Exception:
+                pass
+        await self._disconnect_client(nick)
+
+    async def send_typing(self, is_typing: bool) -> None:
+        payload = proto.make_typing(self._host_nick, is_typing)
+        await self._broadcast(payload)
+
+    def web_traffic_key(self) -> bytes:
+        """AES-GCM key shared by browser clients.
+
+        Derived from the group session key rather than being it: browsers have
+        no ChaCha20-Poly1305, so their traffic uses a different cipher, and the
+        same key bytes must not be handed to two of them.
+        """
+        return webe2e.derive_traffic_key(bytes(self._crypto._session_key))
+
+    async def receive_web_chat(
+        self,
+        nick: str,
+        content: str,
+        msg_id: str,
+        reply_to_nick: str | None = None,
+        reply_to_content: str | None = None,
+    ) -> None:
+        """Accept a message from a web client, notify Qt and forward to TCP clients."""
+        payload = proto.make_chat(
+            nick, content, msg_id,
+            reply_to_nick=reply_to_nick, reply_to_content=reply_to_content,
+        )
+        self._on_event(payload)
+        await self._broadcast(payload)
+
+    async def receive_web_file(self, nick: str, payload: dict) -> None:
+        """Relay one file frame (start/chunk/end) from a browser client.
+
+        The nick is stamped here from the authenticated session, so a browser
+        cannot attribute a transfer to someone else. Size and chunk limits are
+        applied by the caller before this is reached.
+        """
+        payload["nick"] = nick
+        self._on_event(payload)
+        await self._broadcast(payload)
+
+    async def receive_web_edit(self, nick: str, msg_id: str, content: str) -> None:
+        """Edit requested by a web client, attributed to that client's nick."""
+        payload = proto.make_edit(nick, msg_id, content)
+        self._on_event(payload)
+        await self._broadcast(payload)
+
+    async def receive_web_delete(self, nick: str, msg_id: str) -> None:
+        """Delete requested by a web client, attributed to that client's nick.
+
+        Distinct from `send_delete`, which speaks for the host — a web guest
+        deleting its own message must not appear to be the host doing it.
+        """
+        payload = proto.make_delete(nick, msg_id)
+        self._on_event(payload)
+        await self._broadcast(payload)
+
+    async def receive_web_typing(self, nick: str, is_typing: bool) -> None:
+        payload = proto.make_typing(nick, is_typing)
+        self._on_event(payload)
+        await self._broadcast(payload)
+
+    async def send_delete(self, msg_id: str) -> None:
+        payload = proto.make_delete(self._host_nick, msg_id)
+        self._on_event(payload)
+        await self._broadcast(payload)
+
+    async def send_edit(self, msg_id: str, content: str) -> None:
+        payload = proto.make_edit(self._host_nick, msg_id, content)
+        self._on_event(payload)
+        await self._broadcast(payload)
+
+    # ------------------------------------------------------------------
+    # Client handler
+    # ------------------------------------------------------------------
+
+    async def _handle_client(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        conn_crypto = SessionCrypto()
+        nick = None
+        try:
+            # Step 1: receive hello
+            hello = await asyncio.wait_for(proto.recv_msg(reader), timeout=30)
+            if hello.get("type") != "hello":
+                return
+            client_pub = hello["public_key"]
+            nick = self._sanitize_nick(hello.get("nick", "anonymous"))
+
+            # Step 1b: password check (if session is protected)
+            if self._session_password_hash:
+                if not hmac.compare_digest(
+                    hello.get("password_hash", ""), self._session_password_hash
+                ):
+                    await proto.send_msg(writer, {"type": "auth_failed"})
+                    return
+
+            # Deduplicate nick
+            if nick in self._clients or nick == self._host_nick:
+                nick = f"{nick}_{len(self._clients)+1}"
+
+            # Step 2: ECDH + wrap session key
+            wrapped = self._crypto.wrap_session_key(client_pub)
+            welcome = {
+                "type": "welcome",
+                "public_key": self._crypto.public_key_b64,
+                "nonce": wrapped["nonce"],
+                "ciphertext": wrapped["ciphertext"],
+            }
+            conn_crypto.set_session_key(bytes(self._crypto._session_key))
+            await proto.send_msg(writer, welcome)
+
+            # Step 3: send current user list
+            users = [self._host_nick] + list(self._clients.keys())
+            await self._send_encrypted(writer, conn_crypto, proto.make_userlist(users))
+
+            # Register client + start its dedicated writer task (see
+            # _client_writer_loop) — from here on, every send to this client
+            # must go through self._client_queues[nick]/_enqueue_to, never a
+            # direct write, or the two could interleave bytes on the wire.
+            self._clients[nick] = (reader, writer, conn_crypto)
+            self._client_queues[nick] = asyncio.PriorityQueue()
+            self._client_writer_tasks[nick] = asyncio.create_task(self._client_writer_loop(nick))
+
+            # Step 4: broadcast join to everyone (including new client)
+            join_payload = proto.make_join(nick)
+            self._on_event(join_payload)
+            await self._broadcast(join_payload)
+
+            # Step 5: read loop
+            while True:
+                frame = await proto.recv_msg(reader)
+                if frame.get("type") != "encrypted":
+                    continue
+                inner = conn_crypto.decrypt(frame)
+                msg_type = inner.get("type")
+
+                if msg_type == "chat":
+                    inner["nick"] = nick
+                    self._on_event(inner)
+                    await self._broadcast(inner, exclude_nick=nick)
+
+                elif msg_type in ("file_start", "file_chunk", "file_end"):
+                    inner["nick"] = nick
+                    self._on_event(inner)
+                    await self._broadcast(inner, exclude_nick=nick)
+
+                elif msg_type == "typing":
+                    inner["nick"] = nick
+                    self._on_event(inner)
+                    await self._broadcast(inner, exclude_nick=nick)
+
+                elif msg_type == "delete":
+                    inner["nick"] = nick
+                    self._on_event(inner)
+                    await self._broadcast(inner, exclude_nick=nick)
+
+                elif msg_type == "edit":
+                    inner["nick"] = nick
+                    self._on_event(inner)
+                    await self._broadcast(inner, exclude_nick=nick)
+
+                elif msg_type == "ping":
+                    self._enqueue_to(nick, proto.make_pong(inner.get("ts", 0.0)))
+
+                elif msg_type == "leave":
+                    await self._disconnect_client(nick)
+                    return
+
+                elif msg_type == "panic":
+                    inner["nick"] = nick
+                    self._on_event(inner)
+                    await self._broadcast(inner)
+                    return
+
+        except (asyncio.IncompleteReadError, ConnectionResetError, asyncio.TimeoutError):
+            pass
+        except Exception:
+            pass
+        finally:
+            if nick and nick in self._clients:
+                await self._disconnect_client(nick)
+
+    async def _disconnect_client(self, nick: str) -> None:
+        entry = self._clients.pop(nick, None)
+        self._client_queues.pop(nick, None)
+        writer_task = self._client_writer_tasks.pop(nick, None)
+        # Guard against a writer task cancelling itself: _client_writer_loop
+        # calls _disconnect_client on its own send failure, which would
+        # otherwise reach this line while running as `writer_task`.
+        if writer_task is not None and writer_task is not asyncio.current_task() and not writer_task.done():
+            writer_task.cancel()
+        if entry:
+            _, writer, crypto = entry
+            try:
+                writer.close()
+            except Exception:
+                pass
+            crypto.wipe()
+            leave_payload = proto.make_leave(nick)
+            self._on_event(leave_payload)
+            await self._broadcast(leave_payload)
+
+    @staticmethod
+    def _sanitize_nick(nick: str) -> str:
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+        sanitized = "".join(c for c in nick if c in allowed)[:20]
+        return sanitized or "anon"

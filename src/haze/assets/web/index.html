@@ -1,0 +1,1267 @@
+<!DOCTYPE html>
+<!--
+  Haze web chat — served by the host on the onion service's virtual port 80 so
+  guests can join from Tor Browser without installing anything.
+
+  CANONICAL COPY. The Android client serves this same file from
+  app/src/main/assets/web/index.html; the two are kept byte-identical, so edit
+  this one and copy it across (see web_server.py / WebChatServer.kt).
+
+  Everything is inline and same-origin: no CDN, no font fetch, no analytics.
+  A page served over an onion service that reaches out to a third party would
+  hand that third party the visit, so the CSP below forbids it outright.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' blob:; media-src blob:; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark">
+<title>Haze · Secure Chat</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#080808;--surface:#0f0f0f;--surface2:#141414;--surface3:#1a1a1a;
+  --border:#1e1e1e;--border2:#252525;--text:#d4d4d4;--text2:#909090;
+  --text3:#484848;--text4:#2c2c2c;--accent:#ffffff;--green:#34c759;
+  --red:#ff3b30;--yellow:#ffd60a;--radius:12px;--radius-sm:8px;
+  --bar:52px;
+}
+html,body{height:100%}
+body{
+  background:var(--bg);color:var(--text);font-size:14px;
+  font-family:"SF Pro Text","Segoe UI",system-ui,-apple-system,sans-serif;
+  -webkit-text-size-adjust:100%;overflow:hidden;
+}
+button,input,textarea{font-family:inherit;color:inherit}
+button{cursor:pointer;border:none;background:none}
+/* Tor Browser is Firefox, which ignores ::-webkit-scrollbar — without the
+   standard properties the scrollbar renders in the default light theme and
+   leaves a white stripe down the side of a black page. */
+*{scrollbar-width:thin;scrollbar-color:#242424 transparent}
+::-webkit-scrollbar{width:3px;height:3px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#242424;border-radius:2px}
+
+/* ══ Shell ══════════════════════════════════════════════════════════
+   Phones get the app itself, edge to edge. From 900px up the same markup
+   becomes a centred desktop-style app window: rounded, bordered, floating
+   on the page background — the shape the native desktop client has. */
+#shell{height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+@media (min-width:900px){
+  body{padding:20px;background:#050505}
+  #shell{
+    height:calc(100dvh - 40px);max-width:1180px;margin:0 auto;
+    border:1px solid #232326;border-radius:16px;background:var(--bg);
+    box-shadow:0 24px 70px rgba(0,0,0,.6);
+  }
+}
+
+/* ══ Install banner ═════════════════════════════════════════════════ */
+#banner{
+  display:flex;align-items:center;gap:10px;flex-shrink:0;font-size:12px;
+  padding:9px 14px;background:rgba(52,199,89,.07);
+  border-bottom:1px solid rgba(52,199,89,.16);
+}
+@media (min-width:900px){#banner{border-radius:16px 16px 0 0}}
+#banner .b-txt{flex:1;color:var(--text2);line-height:1.45}
+#banner .b-txt strong{color:var(--text);font-weight:600}
+#banner .b-url{
+  color:var(--green);font-weight:700;white-space:nowrap;
+  /* Selectable so it can be copied, but it is not a link — see the markup. */
+  user-select:all;
+}
+#banner .b-x{flex-shrink:0;color:var(--text3);font-size:15px;padding:4px 6px}
+
+/* ══ Join screen ════════════════════════════════════════════════════ */
+#join{
+  flex:1;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;padding:28px 20px;overflow-y:auto;
+}
+.card{
+  width:100%;max-width:370px;display:flex;flex-direction:column;gap:16px;
+  background:var(--surface);border:1px solid var(--border2);
+  border-radius:20px;padding:32px 26px;
+}
+.brand{display:flex;flex-direction:column;align-items:center;gap:10px}
+.brand img{width:132px;height:auto;opacity:.95}
+.brand p{font-size:9px;color:var(--text4);letter-spacing:2.4px}
+.enc{
+  display:flex;align-items:center;gap:8px;padding:9px 12px;
+  background:rgba(52,199,89,.07);border:1px solid rgba(52,199,89,.15);
+  border-radius:var(--radius-sm);
+}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--green);flex-shrink:0}
+.enc b{font-size:10.5px;color:var(--green);font-weight:700;letter-spacing:.4px}
+.enc span{font-size:10px;color:var(--text3);margin-left:auto}
+.sep{height:1px;background:var(--border)}
+input[type=text],input[type=password],textarea{
+  width:100%;background:var(--surface2);border:1px solid var(--border);
+  border-radius:var(--radius-sm);padding:13px 15px;outline:none;
+  /* 16px keeps mobile Safari/Firefox from zooming the viewport on focus. */
+  font-size:16px;transition:border-color .15s;
+}
+input:focus,textarea:focus{border-color:var(--border2)}
+#join-btn{
+  width:100%;background:var(--accent);color:#000;font-size:15px;
+  font-weight:600;padding:14px 0;border-radius:var(--radius-sm);
+}
+#join-btn:disabled{opacity:.45}
+#join-err{min-height:16px;font-size:11.5px;color:var(--red);text-align:center}
+.note{font-size:10px;color:var(--text4);text-align:center;line-height:1.65}
+
+/* ══ Chat ═══════════════════════════════════════════════════════════ */
+#app{display:none;flex:1;flex-direction:column;overflow:hidden}
+#app.on{display:flex}
+
+#topbar{
+  height:var(--bar);flex-shrink:0;display:flex;align-items:center;gap:10px;
+  padding:0 12px;background:var(--surface);border-bottom:1px solid var(--border);
+}
+#topbar img{height:15px;width:auto;opacity:.9;flex-shrink:0}
+#roster-btn{
+  display:none;width:36px;height:36px;border-radius:9px;flex-shrink:0;
+  align-items:center;justify-content:center;color:var(--text2);font-size:17px;
+}
+#status{
+  display:flex;align-items:center;gap:6px;padding:4px 10px;border-radius:20px;
+  background:rgba(52,199,89,.07);border:1px solid rgba(52,199,89,.14);
+  font-size:10px;font-weight:600;color:var(--green);letter-spacing:.4px;
+  white-space:nowrap;
+}
+#status.warn{background:rgba(255,214,10,.07);border-color:rgba(255,214,10,.18);color:var(--yellow)}
+#status.bad{background:rgba(255,59,48,.07);border-color:rgba(255,59,48,.2);color:var(--red)}
+#status .dot{background:currentColor}
+#spacer{flex:1}
+#count{font-size:11px;color:var(--text3);white-space:nowrap}
+#renew{
+  display:flex;align-items:center;gap:5px;flex-shrink:0;
+  background:var(--surface3);border:1px solid var(--border2);color:var(--text2);
+  font-size:11px;font-weight:600;padding:7px 12px;border-radius:20px;
+}
+#renew:disabled{opacity:.4}
+#renew .ic{display:inline-block;font-size:13px;transition:transform .5s}
+#renew.spin .ic{transform:rotate(360deg)}
+#renew-note{font-size:10px;color:var(--text3);white-space:nowrap}
+
+#body{flex:1;display:flex;overflow:hidden;position:relative}
+
+/* ── Roster ── */
+#roster{
+  width:210px;flex-shrink:0;display:flex;flex-direction:column;
+  background:var(--surface);border-right:1px solid var(--border);
+}
+#roster h2{
+  padding:14px 14px 8px;font-size:9px;font-weight:700;color:var(--text4);
+  letter-spacing:2px;text-transform:uppercase;
+}
+#people{flex:1;overflow-y:auto;padding:0 8px 8px;list-style:none}
+#people li{
+  display:flex;align-items:center;gap:9px;padding:8px 9px;margin-bottom:2px;
+  border-radius:var(--radius-sm);font-size:12.5px;color:var(--text2);
+}
+#people .av{
+  width:24px;height:24px;border-radius:50%;flex-shrink:0;position:relative;
+  background:#18181a;border:1px solid #2d2d30;display:flex;
+  align-items:center;justify-content:center;font-size:9px;font-weight:700;
+  color:#646469;
+}
+/* Presence: anyone on this list is in the room, so every avatar carries the
+   green dot — matching the native clients, where marking only yourself made
+   every peer (the host included) look offline. */
+#people .av::after{
+  content:'';position:absolute;right:-1px;bottom:-1px;width:7px;height:7px;
+  border-radius:50%;background:var(--green);border:1.5px solid var(--surface);
+}
+#people .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#people .me{color:var(--text)}
+#roster-close{display:none}
+
+/* ── Messages ── */
+#main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+#msgs{
+  flex:1;overflow-y:auto;padding:14px 16px 4px;
+  display:flex;flex-direction:column;gap:2px;
+}
+#msgs .inner{width:100%;max-width:820px;margin:0 auto;display:flex;flex-direction:column;gap:2px}
+
+.row{display:flex;flex-direction:column;max-width:78%;margin-bottom:6px}
+.row.me{align-self:flex-end;align-items:flex-end}
+.row.ot{align-self:flex-start;align-items:flex-start}
+.row .who{
+  font-size:9.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;
+  color:var(--text4);margin:0 4px 3px;
+}
+.bubble{
+  padding:9px 13px;border-radius:var(--radius);font-size:14px;line-height:1.5;
+  word-break:break-word;white-space:pre-wrap;
+}
+.row.ot .bubble{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.05);color:#cfcfcf}
+.row.me .bubble{background:rgba(255,255,255,.09);border:1px solid rgba(255,255,255,.07);color:var(--text)}
+.row.gone .bubble{opacity:.4;font-style:italic;color:var(--text3)}
+.quote{
+  border-left:2px solid var(--text4);padding:2px 0 2px 8px;margin-bottom:5px;
+  font-size:11.5px;color:var(--text3);
+}
+.quote b{display:block;color:var(--text2);font-weight:600;margin-bottom:1px}
+.meta{
+  display:flex;align-items:center;gap:6px;margin:3px 4px 0;
+  font-size:9.5px;color:var(--text4);
+}
+.edited{font-style:italic}
+/* Hover reveals the actions on a pointer; a tap does it on touch, where there
+   is no hover and permanently visible buttons under every bubble turn the
+   thread into noise. */
+.acts{display:flex;gap:2px;opacity:0;transition:opacity .12s}
+.row:hover .acts,.row.show-acts .acts{opacity:1}
+.acts button{
+  font-size:9.5px;font-weight:600;color:var(--text3);padding:3px 6px;
+  border-radius:5px;letter-spacing:.3px;
+}
+.acts button:hover{background:rgba(255,255,255,.06);color:var(--text2)}
+
+/* Attachments */
+.media{margin-top:2px;max-width:100%}
+.media img,.media video{
+  display:block;max-width:100%;max-height:340px;border-radius:10px;background:#000;
+}
+.media audio{display:block;width:230px;max-width:100%}
+.file{
+  display:flex;align-items:center;gap:10px;padding:10px 12px;
+  background:rgba(255,255,255,.04);border:1px solid var(--border2);
+  border-radius:10px;font-size:12px;color:var(--text2);text-decoration:none;
+}
+.file .fi{font-size:16px;flex-shrink:0}
+.file .fn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.file .fs{margin-left:auto;font-size:10px;color:var(--text4);flex-shrink:0}
+
+.sys{
+  align-self:center;text-align:center;max-width:80%;padding:5px 0;
+  font-size:10.5px;color:var(--text4);letter-spacing:.3px;
+}
+
+#typing{height:18px;flex-shrink:0;padding:0 18px;font-size:11px;color:var(--text4);font-style:italic}
+
+/* ── Composer ── */
+#reply-bar{
+  display:none;align-items:center;gap:10px;padding:8px 14px;
+  background:var(--surface2);border-top:1px solid var(--border);
+}
+#reply-bar.on{display:flex}
+#reply-bar .rb{flex:1;min-width:0;border-left:2px solid var(--green);padding-left:8px}
+#reply-bar .rb b{display:block;font-size:10px;color:var(--green);font-weight:700}
+#reply-bar .rb span{
+  display:block;font-size:11px;color:var(--text3);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;
+}
+#reply-bar button{color:var(--text3);font-size:15px;padding:2px 6px}
+
+#composer{
+  flex-shrink:0;display:flex;align-items:flex-end;gap:9px;
+  padding:10px 12px calc(10px + env(safe-area-inset-bottom));
+  background:rgba(8,8,8,.98);border-top:1px solid var(--border);
+}
+#input{
+  flex:1;resize:none;max-height:120px;overflow-y:auto;line-height:1.4;
+  background:rgba(255,255,255,.04);border-radius:22px;padding:11px 15px;
+}
+#attach{
+  width:38px;height:38px;flex-shrink:0;border-radius:50%;font-size:20px;
+  color:var(--text2);background:rgba(255,255,255,.05);
+  display:flex;align-items:center;justify-content:center;transition:all .15s;
+}
+#attach:hover{background:rgba(255,255,255,.1);color:var(--text)}
+#attach:disabled{opacity:.4}
+#mic{
+  width:38px;height:38px;flex-shrink:0;border-radius:50%;font-size:13px;
+  color:var(--text2);background:rgba(255,255,255,.05);
+  display:flex;align-items:center;justify-content:center;transition:all .15s;
+}
+#mic:hover{background:rgba(255,255,255,.1);color:var(--text)}
+#mic.rec{background:rgba(255,59,48,.18);color:var(--red);animation:pulse 1s infinite}
+@keyframes pulse{50%{opacity:.45}}
+#blur-toggle{
+  width:30px;height:30px;flex-shrink:0;border-radius:8px;font-size:14px;
+  color:var(--text3);display:flex;align-items:center;justify-content:center;
+}
+#blur-toggle.on{color:var(--green);background:rgba(52,199,89,.1)}
+
+/* Privacy blur: contents stay unreadable until the bubble is clicked, for
+   reading in a place where someone can see the screen. */
+body.blurred .bubble > *:not(.quote){filter:blur(7px);transition:filter .15s}
+body.blurred .row.reveal .bubble > *{filter:none}
+body.blurred .media img,body.blurred .media video{filter:blur(14px)}
+body.blurred .row.reveal .media img,body.blurred .row.reveal .media video{filter:none}
+#send{
+  width:42px;height:42px;flex-shrink:0;border-radius:50%;
+  background:var(--accent);color:#000;font-size:17px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;
+}
+#send:disabled{opacity:.4}
+
+/* Drag-and-drop target covering the message area. */
+#drop-hint{
+  display:none;position:absolute;inset:0;z-index:30;
+  align-items:center;justify-content:center;
+  background:rgba(8,8,8,.86);border:2px dashed var(--green);border-radius:12px;
+  color:var(--green);font-size:15px;font-weight:700;letter-spacing:1px;
+}
+#drop-hint.on{display:flex}
+
+/* Upload progress inside the sender's own bubble. */
+.uprog{
+  height:3px;border-radius:2px;background:rgba(255,255,255,.12);
+  margin-top:6px;overflow:hidden;
+}
+.uprog i{display:block;height:100%;background:var(--green);width:0;transition:width .15s}
+
+/* ══ Phone layout ═══════════════════════════════════════════════════
+   The roster becomes a slide-over sheet, targets grow to 44px, and the
+   message column goes nearly full width — the shape of the mobile app. */
+@media (max-width:899px){
+  #roster-btn{display:flex}
+  #renew-note{display:none}
+  #count{display:none}
+  #roster{
+    position:absolute;inset:0 auto 0 0;z-index:20;width:78%;max-width:290px;
+    transform:translateX(-100%);transition:transform .22s ease;
+    box-shadow:14px 0 40px rgba(0,0,0,.5);
+  }
+  #roster.open{transform:none}
+  #roster-close{
+    display:flex;align-items:center;justify-content:center;
+    position:absolute;top:8px;right:8px;width:32px;height:32px;
+    border-radius:8px;color:var(--text3);font-size:15px;
+  }
+  #backdrop{
+    display:none;position:absolute;inset:0;z-index:15;background:rgba(0,0,0,.55);
+  }
+  #backdrop.on{display:block}
+  #people li{padding:11px 9px;font-size:14px}
+  .row{max-width:88%}
+  .acts button{padding:6px 8px;font-size:10.5px}
+  #msgs{padding:12px 12px 4px}
+  #send{width:44px;height:44px}
+}
+</style>
+</head>
+<body>
+<div id="shell">
+
+  <!--
+    The app address is deliberately plain text, not a link. A click from this
+    page would take the guest straight from an onion session to a clearnet
+    site, telling that site someone just left this room — and in a browser
+    without Tor, from which IP. Typing it into a fresh tab keeps the two apart.
+  -->
+  <div id="banner">
+    <span class="b-txt">
+      <strong>You are on the web client.</strong>
+      Browser guests are protected by the onion connection, but not by Haze's
+      group encryption. The app is end-to-end encrypted —
+      <span class="b-url">haze.berkkucukk.com</span>
+    </span>
+    <button class="b-x" id="banner-x" title="Dismiss" aria-label="Dismiss">✕</button>
+  </div>
+
+  <!-- ══ Join ══ -->
+  <div id="join">
+    <div class="card">
+      <div class="brand">
+        <img src="/logo.png" alt="Haze" width="420" height="99">
+        <p>ANONYMOUS · ENCRYPTED · EPHEMERAL</p>
+      </div>
+      <div class="enc">
+        <span class="dot"></span>
+        <b>TOR HIDDEN SERVICE</b>
+        <span>end-to-end</span>
+      </div>
+      <div class="sep"></div>
+      <input id="nick" type="text" placeholder="Nickname" maxlength="20"
+             autocomplete="off" spellcheck="false" enterkeyhint="go">
+      <input id="pass" type="password" placeholder="Session password (if required)"
+             autocomplete="off" enterkeyhint="go">
+      <button id="join-btn">Join chat</button>
+      <div id="join-err" role="alert"></div>
+      <p class="note">Nothing is stored on this device.<br>Closing the tab leaves the room.</p>
+    </div>
+  </div>
+
+  <!-- ══ Chat ══ -->
+  <div id="app">
+    <div id="topbar">
+      <button id="roster-btn" title="Participants" aria-label="Participants">☰</button>
+      <img src="/logo.png" alt="Haze" width="420" height="99">
+      <div id="status"><span class="dot"></span><span id="status-t">CONNECTED</span></div>
+      <span id="spacer"></span>
+      <span id="renew-note"></span>
+      <span id="count"></span>
+      <button id="blur-toggle" title="Blur messages until clicked" aria-label="Blur messages">◐</button>
+      <button id="renew" title="Rotate Tor circuits without dropping the session">
+        <span class="ic">⟳</span> Renew
+      </button>
+    </div>
+
+    <div id="body">
+      <div id="backdrop"></div>
+      <aside id="roster">
+        <button id="roster-close" aria-label="Close">✕</button>
+        <h2>Participants</h2>
+        <ul id="people"></ul>
+      </aside>
+
+      <div id="main">
+        <div id="msgs"><div class="inner" id="feed"></div></div>
+        <div id="typing"></div>
+        <div id="reply-bar">
+          <div class="rb"><b id="reply-who"></b><span id="reply-txt"></span></div>
+          <button id="reply-x" aria-label="Cancel reply">✕</button>
+        </div>
+        <div id="composer">
+          <input type="file" id="file-input" hidden>
+          <button id="attach" title="Attach a file" aria-label="Attach a file">＋</button>
+          <button id="mic" title="Record a voice note" aria-label="Record a voice note">●</button>
+          <textarea id="input" rows="1" maxlength="4000" placeholder="Message…"
+                    enterkeyhint="send"></textarea>
+          <button id="send" aria-label="Send">↑</button>
+        </div>
+        <div id="drop-hint">Drop to send</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// Mirrors MAX_FILE_BYTES / MAX_FILE_CHUNKS in the native clients. A browser tab
+// has to hold the whole attachment in memory, so an oversized or over-chunked
+// transfer is dropped rather than assembled.
+const MAX_FILE_BYTES = 100 * 1024 * 1024;
+const MAX_FILE_CHUNKS = 512;
+
+const $ = id => document.getElementById(id);
+const joinView = $("join"), app = $("app"), feed = $("feed"), msgsBox = $("msgs");
+const people = $("people"), input = $("input"), sendBtn = $("send");
+const typingEl = $("typing"), countEl = $("count");
+const statusEl = $("status"), statusT = $("status-t");
+const replyBar = $("reply-bar"), replyWho = $("reply-who"), replyTxt = $("reply-txt");
+
+let ws = null, myNick = null, typingTimer = null, amTyping = false;
+let replyTo = null;                  // {nick, content} while composing a reply
+const mine = new Set();              // msg_ids sent from here (echo suppression)
+const rows = new Map();              // msg_id -> {row, blobUrl, timer}
+const transfers = new Map();         // file_id -> in-flight attachment
+const typers = new Set();
+
+/* ── Helpers ─────────────────────────────────────────────────────── */
+
+const clock = () => new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+
+function humanSize(n) {
+  if (!(n > 0)) return "";
+  const u = ["B", "KB", "MB", "GB"];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (i === 0 ? v : v.toFixed(1)) + " " + u[i];
+}
+
+function setStatus(text, kind) {
+  statusT.textContent = text;
+  statusEl.className = kind || "";
+}
+
+function atBottom() {
+  return msgsBox.scrollHeight - msgsBox.scrollTop - msgsBox.clientHeight < 80;
+}
+
+function scrollDown(force) {
+  if (force || atBottom()) msgsBox.scrollTop = msgsBox.scrollHeight;
+}
+
+/* ── End-to-end encryption ───────────────────────────────────────────
+   Key agreement with the host, then every frame in both directions is
+   AES-256-GCM under a key derived from the room's session key. WebCrypto has
+   no ChaCha20-Poly1305, so the host converts between this and the native
+   clients' stream — see haze/crypto/webe2e.py for the full rationale, and for
+   why this is defence in depth rather than parity with the installed app. */
+
+let trafficKey = null;                  // CryptoKey, set by the handshake
+
+/**
+ * Base64 without spreading the array into function arguments: `...bytes` blows
+ * the call-stack limit somewhere around a hundred thousand elements, and an
+ * encrypted file chunk is several times that. Built in slices instead, so the
+ * same helper works for a 32-byte public key and a 350 KB ciphertext.
+ */
+function b64(bytes) {
+  const view = new Uint8Array(bytes);
+  let s = "";
+  for (let i = 0; i < view.length; i += 8192) {
+    s += String.fromCharCode.apply(null, view.subarray(i, i + 8192));
+  }
+  return btoa(s);
+}
+const unb64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+/** X25519 where the browser has it, P-256 everywhere else (older Tor Browser). */
+async function generateKeyPair() {
+  try {
+    const kp = await crypto.subtle.generateKey({name: "X25519"}, true, ["deriveBits"]);
+    return {kp: kp, alg: "X25519"};
+  } catch (e) {
+    const kp = await crypto.subtle.generateKey(
+      {name: "ECDH", namedCurve: "P-256"}, true, ["deriveBits"]);
+    return {kp: kp, alg: "P-256"};
+  }
+}
+
+async function importPeer(raw, alg) {
+  return alg === "X25519"
+    ? crypto.subtle.importKey("raw", raw, {name: "X25519"}, false, [])
+    : crypto.subtle.importKey("raw", raw, {name: "ECDH", namedCurve: "P-256"}, false, []);
+}
+
+/** Unseal the traffic key the host sent in its "welcome". */
+async function completeHandshake(priv, alg, msg) {
+  const peer = await importPeer(unb64(msg.pubkey), alg);
+  const shared = await crypto.subtle.deriveBits(
+    alg === "X25519" ? {name: "X25519", public: peer} : {name: "ECDH", public: peer},
+    priv, 256);
+
+  const hkdfKey = await crypto.subtle.importKey("raw", shared, "HKDF", false, ["deriveBits"]);
+  const wrapBits = await crypto.subtle.deriveBits({
+    name: "HKDF", hash: "SHA-256",
+    salt: new Uint8Array(),
+    info: new TextEncoder().encode("haze-web-handshake-v1"),
+  }, hkdfKey, 256);
+
+  const wrapKey = await crypto.subtle.importKey("raw", wrapBits, "AES-GCM", false, ["decrypt"]);
+  const raw = await crypto.subtle.decrypt(
+    {name: "AES-GCM", iv: unb64(msg.nonce)}, wrapKey, unb64(msg.ciphertext));
+  trafficKey = await crypto.subtle.importKey(
+    "raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+
+async function sealEvent(payload) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt(
+    {name: "AES-GCM", iv: iv}, trafficKey,
+    new TextEncoder().encode(JSON.stringify(payload)));
+  return {type: "encrypted", nonce: b64(iv), ciphertext: b64(ct)};
+}
+
+async function openEvent(envelope) {
+  const plain = await crypto.subtle.decrypt(
+    {name: "AES-GCM", iv: unb64(envelope.nonce)}, trafficKey, unb64(envelope.ciphertext));
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
+/** Every outbound frame goes through here, so nothing can skip the encryption. */
+async function sendSecure(payload) {
+  if (!ws || ws.readyState !== 1 || !trafficKey) return false;
+  ws.send(JSON.stringify(await sealEvent(payload)));
+  return true;
+}
+
+/* ── Password hashing (matches the server: SHA-256("haze-session-v1:"+pw)) ── */
+async function hashPassword(pw) {
+  if (!pw) return "";
+  const enc = new TextEncoder();
+  const prefix = enc.encode("haze-session-v1:"), body = enc.encode(pw);
+  const buf = new Uint8Array(prefix.length + body.length);
+  buf.set(prefix, 0); buf.set(body, prefix.length);
+  const digest = await crypto.subtle.digest("SHA-256", buf);
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+/* ── Roster ──────────────────────────────────────────────────────── */
+
+function addPerson(nick) {
+  if (!nick || people.querySelector(`[data-n="${CSS.escape(nick)}"]`)) return;
+  const li = document.createElement("li");
+  li.dataset.n = nick;
+  const av = document.createElement("span");
+  av.className = "av";
+  av.textContent = (nick.replace(/^\[web\]/, "")[0] || "?").toUpperCase();
+  const nm = document.createElement("span");
+  nm.className = "nm";
+  nm.textContent = nick === myNick ? nick + " (you)" : nick;
+  if (nick === myNick) li.className = "me";
+  li.append(av, nm);
+  people.appendChild(li);
+  refreshCount();
+}
+
+function removePerson(nick) {
+  const el = people.querySelector(`[data-n="${CSS.escape(nick)}"]`);
+  if (el) el.remove();
+  refreshCount();
+}
+
+function refreshCount() {
+  const n = people.children.length;
+  countEl.textContent = n + (n === 1 ? " participant" : " participants");
+}
+
+/* ── Message rendering ───────────────────────────────────────────── */
+
+function messageRow(nick, msgId, opts) {
+  const o = opts || {};
+  const isMine = nick === myNick;
+  const row = document.createElement("div");
+  row.className = "row " + (isMine ? "me" : "ot");
+  if (msgId) row.dataset.mid = msgId;
+
+  if (!isMine) {
+    const who = document.createElement("div");
+    who.className = "who";
+    who.textContent = nick;
+    row.appendChild(who);
+  }
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+
+  if (o.replyNick) {
+    const q = document.createElement("div");
+    q.className = "quote";
+    const b = document.createElement("b");
+    b.textContent = o.replyNick;
+    q.appendChild(b);
+    q.appendChild(document.createTextNode(o.replyContent || ""));
+    bubble.appendChild(q);
+  }
+
+  if (o.text) {
+    const t = document.createElement("span");
+    t.textContent = o.text;
+    bubble.appendChild(t);
+  }
+  if (o.node) {
+    const wrap = document.createElement("div");
+    wrap.className = "media";
+    wrap.appendChild(o.node);
+    bubble.appendChild(wrap);
+  }
+  // Touch has no hover, so a tap on the bubble reveals this row's actions.
+  // Ignored on media so tapping a video still hits the player's own controls.
+  if (o.text) {
+    bubble.addEventListener("click", () => {
+      const wasOpen = row.classList.contains("show-acts");
+      feed.querySelectorAll(".row.show-acts").forEach(r => r.classList.remove("show-acts"));
+      if (!wasOpen) row.classList.add("show-acts");
+    });
+  }
+  // While blur is on, a click reveals just this row.
+  bubble.addEventListener("click", () => {
+    if (document.body.classList.contains("blurred")) row.classList.toggle("reveal");
+  });
+  row.appendChild(bubble);
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  const ts = document.createElement("span");
+  ts.textContent = clock();
+  meta.appendChild(ts);
+
+  // Actions. Delete is offered only for your own messages; the wire protocol
+  // stamps the sender server-side, so this is about not encouraging a guest to
+  // moderate other people's messages.
+  const acts = document.createElement("span");
+  acts.className = "acts";
+  if (o.text) acts.appendChild(actionBtn("Reply", () => startReply(nick, o.text)));
+  if (o.text) acts.appendChild(actionBtn("Copy", () => copyText(o.text)));
+  if (isMine && msgId && o.text) acts.appendChild(actionBtn("Edit", () => editOwn(msgId)));
+  if (isMine && msgId) acts.appendChild(actionBtn("Delete", () => deleteOwn(msgId)));
+  meta.appendChild(acts);
+  row.appendChild(meta);
+
+  feed.appendChild(row);
+  const entry = rows.get(msgId) || {};
+  entry.row = row;
+  if (msgId) rows.set(msgId, entry);
+  scrollDown(isMine);
+  return row;
+}
+
+function actionBtn(label, fn) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.textContent = label;
+  b.addEventListener("click", fn);
+  return b;
+}
+
+function systemMsg(text) {
+  const el = document.createElement("div");
+  el.className = "sys";
+  el.textContent = text;
+  feed.appendChild(el);
+  scrollDown(true);
+}
+
+function copyText(text) {
+  if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+}
+
+/* ── Disappearing messages ───────────────────────────────────────────
+   Honour the host's timer here too: a browser guest that kept a message the
+   rest of the room has already dropped would quietly defeat the setting. */
+function scheduleDisappear(msgId, secs) {
+  if (!msgId || !(secs > 0)) return;
+  const entry = rows.get(msgId);
+  if (!entry) return;
+  entry.timer = setTimeout(() => dropRow(msgId), secs * 1000);
+}
+
+function dropRow(msgId) {
+  const entry = rows.get(msgId);
+  if (!entry) return;
+  if (entry.timer) clearTimeout(entry.timer);
+  if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
+  if (entry.row) entry.row.remove();
+  rows.delete(msgId);
+}
+
+/* ── Reply / delete ──────────────────────────────────────────────── */
+
+function startReply(nick, content) {
+  replyTo = {nick: nick, content: content};
+  replyWho.textContent = "Replying to " + nick;
+  replyTxt.textContent = content;
+  replyBar.classList.add("on");
+  input.focus();
+}
+
+function cancelReply() {
+  replyTo = null;
+  replyBar.classList.remove("on");
+}
+
+function deleteOwn(msgId) {
+  sendSecure({type: "delete", msg_id: msgId});
+  markDeleted(msgId);
+}
+
+/** Edit one of your own messages in place. */
+function editOwn(msgId) {
+  const entry = rows.get(msgId);
+  if (!entry || !entry.row) return;
+  const bubble = entry.row.querySelector(".bubble");
+  const current = bubble ? bubble.textContent.replace(/\s*edited$/, "") : "";
+  const next = prompt("Edit message", current);
+  if (next === null) return;
+  const text = next.trim();
+  if (!text || text === current) return;
+  sendSecure({type: "edit", msg_id: msgId, content: text});
+  markEdited(msgId, text);
+}
+
+function markDeleted(msgId) {
+  const entry = rows.get(msgId);
+  if (!entry || !entry.row) return;
+  if (entry.blobUrl) { URL.revokeObjectURL(entry.blobUrl); entry.blobUrl = null; }
+  entry.row.classList.add("gone");
+  const bubble = entry.row.querySelector(".bubble");
+  if (bubble) bubble.textContent = "Message deleted";
+  const acts = entry.row.querySelector(".acts");
+  if (acts) acts.remove();
+}
+
+function markEdited(msgId, content) {
+  const entry = rows.get(msgId);
+  if (!entry || !entry.row) return;
+  const bubble = entry.row.querySelector(".bubble");
+  if (!bubble) return;
+  bubble.textContent = content;
+  const meta = entry.row.querySelector(".meta");
+  if (meta && !meta.querySelector(".edited")) {
+    const e = document.createElement("span");
+    e.className = "edited";
+    e.textContent = "edited";
+    meta.insertBefore(e, meta.firstChild.nextSibling);
+  }
+}
+
+/* ── Attachments ─────────────────────────────────────────────────────
+   Files arrive as file_start / file_chunk (base64) / file_end, exactly as the
+   native clients send them, and are assembled into a Blob here. */
+
+function fileStart(d) {
+  const id = d.file_id;
+  if (!id) return;
+  // Our own upload comes back from the host; we already rendered it.
+  if (mine.has(id)) return;
+  // The wire field names are total_size / total_chunks (see protocol.py's
+  // make_file_start). Reading "size"/"chunks" left both at 0, which quietly
+  // disabled the caps below and the progress readout.
+  const size = Number(d.total_size) || 0, chunks = Number(d.total_chunks) || 0;
+  if (size > MAX_FILE_BYTES || chunks > MAX_FILE_CHUNKS || chunks <= 0) {
+    systemMsg((d.nick || "someone") + " sent an attachment that is too large to open here");
+    return;
+  }
+  const placeholder = document.createElement("div");
+  placeholder.className = "file";
+  placeholder.textContent = "Receiving " + (d.filename || "file") + "…";
+  const row = messageRow(d.nick, null, {node: placeholder});
+  transfers.set(id, {
+    nick: d.nick, name: String(d.filename || "file"), mime: String(d.mime || ""),
+    size: size, chunks: chunks, parts: [], bytes: 0, row: row, ph: placeholder,
+  });
+}
+
+function fileChunk(d) {
+  const t = transfers.get(d.file_id);
+  if (!t) return;
+  let bin;
+  try { bin = atob(String(d.data || "")); } catch (e) { return abortTransfer(d.file_id); }
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  t.bytes += bytes.length;
+  if (t.bytes > MAX_FILE_BYTES || t.parts.length >= MAX_FILE_CHUNKS) return abortTransfer(d.file_id);
+  const idx = Number(d.chunk_index);
+  t.parts[Number.isFinite(idx) ? idx : t.parts.length] = bytes;
+  if (t.size) {
+    const pct = Math.min(100, Math.round(t.bytes / t.size * 100));
+    t.ph.textContent = "Receiving " + t.name + "… " + pct + "%";
+  }
+}
+
+function abortTransfer(id) {
+  const t = transfers.get(id);
+  if (t) {
+    t.ph.textContent = "Attachment failed";
+    transfers.delete(id);
+  }
+}
+
+function fileEnd(d) {
+  if (mine.has(d.file_id)) { mine.delete(d.file_id); return; }
+  const t = transfers.get(d.file_id);
+  if (!t) return;
+  transfers.delete(d.file_id);
+  const parts = t.parts.filter(Boolean);
+  const blob = new Blob(parts, t.mime ? {type: t.mime} : undefined);
+  const url = URL.createObjectURL(blob);
+  const node = mediaNode(t.mime, t.name, blob.size, url);
+  const wrap = t.ph.parentNode;
+  if (wrap) { wrap.replaceChild(node, t.ph); } else { t.row.appendChild(node); }
+  // Keyed by the row so panic/leave cleanup can revoke it.
+  const key = "file:" + d.file_id;
+  rows.set(key, {row: t.row, blobUrl: url});
+  scrollDown(false);
+}
+
+function mediaNode(mime, name, size, url) {
+  // SVG is deliberately never rendered inline: it can carry script, and this
+  // page's origin is the session. Same reasoning for anything unrecognised —
+  // it becomes a download the user opts into.
+  const isImage = mime.startsWith("image/") && mime !== "image/svg+xml";
+  if (isImage) {
+    const img = document.createElement("img");
+    // Not lazy: the bytes are already in memory as a Blob, so deferring buys
+    // nothing — and a lazily-loaded image inside this scroll container stays
+    // undecoded (naturalWidth 0) until it is scrolled into view.
+    img.src = url; img.alt = name; img.decoding = "async";
+    return img;
+  }
+  if (mime.startsWith("video/")) {
+    const v = document.createElement("video");
+    v.src = url; v.controls = true; v.preload = "metadata"; v.playsInline = true;
+    return v;
+  }
+  if (mime.startsWith("audio/")) {
+    const a = document.createElement("audio");
+    a.src = url; a.controls = true; a.preload = "metadata";
+    return a;
+  }
+  const link = document.createElement("a");
+  link.className = "file";
+  link.href = url;
+  link.download = name;
+  const ic = document.createElement("span");
+  ic.className = "fi"; ic.textContent = "⤓";
+  const fn = document.createElement("span");
+  fn.className = "fn"; fn.textContent = name;
+  const fs = document.createElement("span");
+  fs.className = "fs"; fs.textContent = humanSize(size);
+  link.append(ic, fn, fs);
+  return link;
+}
+
+/* ── Sending attachments ─────────────────────────────────────────────
+   Same three-frame shape the native clients use (file_start / file_chunk /
+   file_end), so a browser upload arrives on desktop and mobile as an ordinary
+   transfer. Each frame goes through sendSecure, so the bytes are encrypted
+   before they reach the socket. */
+
+const CHUNK_SIZE = 256 * 1024;          // matches protocol.py's CHUNK_SIZE
+
+async function sendFile(file) {
+  if (!file || !trafficKey) return;
+  if (file.size > MAX_FILE_BYTES) {
+    systemMsg("That file is too large (max " + humanSize(MAX_FILE_BYTES) + ").");
+    return;
+  }
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const total = Math.max(1, Math.ceil(buf.length / CHUNK_SIZE));
+  if (total > MAX_FILE_CHUNKS) {
+    systemMsg("That file has too many chunks to send.");
+    return;
+  }
+
+  const fileId = crypto.randomUUID();
+  const mime = file.type || "application/octet-stream";
+  // Render our own copy immediately, with a progress bar; the echo of this
+  // transfer coming back from the host is suppressed via `mine`.
+  mine.add(fileId);
+  const url = URL.createObjectURL(new Blob([buf], {type: mime}));
+  const node = mediaNode(mime, file.name, buf.length, url);
+  const row = messageRow(myNick, null, {node: node});
+  rows.set("file:" + fileId, {row: row, blobUrl: url});
+
+  const bar = document.createElement("div");
+  bar.className = "uprog";
+  const fill = document.createElement("i");
+  bar.appendChild(fill);
+  row.querySelector(".bubble").appendChild(bar);
+
+  await sendSecure({
+    type: "file_start", file_id: fileId, filename: file.name, mime: mime,
+    total_size: buf.length, total_chunks: total,
+  });
+  for (let i = 0; i < total; i++) {
+    const slice = buf.subarray(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+    const ok = await sendSecure({
+      type: "file_chunk", file_id: fileId, chunk_index: i,
+      data: b64(slice),
+    });
+    if (!ok) { systemMsg("Upload interrupted."); return; }
+    fill.style.width = Math.round((i + 1) / total * 100) + "%";
+    // Yield between chunks so a large file does not freeze the tab.
+    await new Promise(r => setTimeout(r, 0));
+  }
+  await sendSecure({type: "file_end", file_id: fileId});
+  bar.remove();
+}
+
+/* ── Voice notes ─────────────────────────────────────────────────────
+   Recorded with MediaRecorder and sent down the same attachment path, so the
+   native clients receive an ordinary audio file and play it inline. The
+   microphone stream is stopped the moment recording ends — a page that keeps
+   a live mic open is exactly what a chat like this should not do. */
+
+let recorder = null, recChunks = [], recStream = null;
+
+async function toggleRecording() {
+  const btn = $("mic");
+  if (recorder && recorder.state === "recording") {
+    recorder.stop();
+    return;
+  }
+  if (typeof MediaRecorder === "undefined" || !navigator.mediaDevices) {
+    systemMsg("This browser cannot record audio.");
+    return;
+  }
+  try {
+    recStream = await navigator.mediaDevices.getUserMedia({audio: true});
+  } catch (e) {
+    systemMsg("Microphone permission denied.");
+    return;
+  }
+  // Let the browser pick a container it can actually produce; the native
+  // clients map the mime type to an extension when they play it back.
+  const mime = ["audio/webm", "audio/ogg", "audio/mp4"]
+    .find(m => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m));
+  recChunks = [];
+  recorder = new MediaRecorder(recStream, mime ? {mimeType: mime} : undefined);
+  recorder.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
+  recorder.onstop = async () => {
+    btn.classList.remove("rec");
+    recStream.getTracks().forEach(t => t.stop());
+    recStream = null;
+    const type = recorder.mimeType || mime || "audio/webm";
+    const blob = new Blob(recChunks, {type: type});
+    recChunks = [];
+    if (blob.size > 0) {
+      const ext = type.includes("ogg") ? "ogg" : type.includes("mp4") ? "m4a" : "webm";
+      await sendFile(new File([blob], "voice-note." + ext, {type: type}));
+    }
+  };
+  recorder.start();
+  btn.classList.add("rec");
+}
+
+/* ── Privacy blur ────────────────────────────────────────────────── */
+
+function toggleBlur() {
+  const on = document.body.classList.toggle("blurred");
+  $("blur-toggle").classList.toggle("on", on);
+  if (!on) feed.querySelectorAll(".row.reveal").forEach(r => r.classList.remove("reveal"));
+}
+
+/* ── Typing ──────────────────────────────────────────────────────── */
+
+function setTyping(nick, on) {
+  if (nick === myNick) return;
+  on ? typers.add(nick) : typers.delete(nick);
+  const list = [...typers];
+  typingEl.textContent = !list.length ? ""
+    : list.length === 1 ? list[0] + " is typing…"
+    : list.slice(0, 2).join(", ") + (list.length > 2 ? " and others" : "") + " are typing…";
+}
+
+function stopTyping() {
+  clearTimeout(typingTimer);
+  if (!amTyping) return;
+  amTyping = false;
+  sendSecure({type: "typing", state: false});
+}
+
+/* ── Event handling ──────────────────────────────────────────────── */
+
+function handle(d) {
+  switch (d.type) {
+    case "userlist":
+      people.innerHTML = "";
+      (d.users || []).forEach(addPerson);
+      break;
+    case "join":
+      systemMsg(d.nick + " joined");
+      addPerson(d.nick);
+      break;
+    case "leave":
+      systemMsg(d.nick + " left");
+      removePerson(d.nick);
+      setTyping(d.nick, false);
+      break;
+    case "chat": {
+      setTyping(d.nick, false);
+      if (d.msg_id && mine.has(d.msg_id)) { mine.delete(d.msg_id); break; }
+      messageRow(d.nick, d.msg_id, {
+        text: String(d.content == null ? "" : d.content),
+        replyNick: d.reply_to_nick, replyContent: d.reply_to_content,
+      });
+      scheduleDisappear(d.msg_id, Number(d.disappear_secs) || 0);
+      break;
+    }
+    case "typing": setTyping(d.nick, !!d.state); break;
+    case "delete": markDeleted(d.msg_id); break;
+    case "edit":   markEdited(d.msg_id, String(d.content == null ? "" : d.content)); break;
+    case "file_start": fileStart(d); break;
+    case "file_chunk": fileChunk(d); break;
+    case "file_end":   fileEnd(d); break;
+    case "panic":
+      systemMsg("⚠ The host ended the session.");
+      wipe();
+      setStatus("SESSION ENDED", "bad");
+      if (ws) ws.close();
+      break;
+    case "kicked":
+      systemMsg("You were removed from this session.");
+      setStatus("REMOVED", "bad");
+      if (ws) ws.close();
+      break;
+    case "auth_failed":
+      app.classList.remove("on");
+      joinView.style.display = "flex";
+      $("join-err").textContent = "Wrong session password.";
+      $("join-btn").disabled = false;
+      ws = null; myNick = null;
+      break;
+  }
+}
+
+/** Drop every message and revoke every attachment URL still held in memory. */
+function wipe() {
+  rows.forEach((entry, key) => {
+    if (entry.timer) clearTimeout(entry.timer);
+    if (entry.blobUrl) URL.revokeObjectURL(entry.blobUrl);
+    if (entry.row) entry.row.remove();
+  });
+  rows.clear();
+  transfers.clear();
+  feed.innerHTML = "";
+}
+
+/* ── Join / send ─────────────────────────────────────────────────── */
+
+async function join() {
+  const raw = $("nick").value.trim();
+  const nick = raw.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 20);
+  if (!nick) { $("join-err").textContent = "Nickname: letters, numbers, _ or - only"; return; }
+  $("join-err").textContent = "";
+  $("join-btn").disabled = true;
+
+  const passwordHash = await hashPassword($("pass").value);
+  const {kp, alg} = await generateKeyPair();
+  const myPub = await crypto.subtle.exportKey("raw", kp.publicKey);
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(proto + "://" + location.host + "/ws");
+
+  ws.onopen = () => {
+    // Only the public key travels in the clear. The nickname and the session
+    // password wait until the channel is encrypted.
+    ws.send(JSON.stringify({type: "hello", pubkey: b64(myPub), alg: alg}));
+    setStatus("KEY EXCHANGE…", "warn");
+  };
+  ws.onmessage = async e => {
+    let d;
+    try { d = JSON.parse(e.data); } catch (err) { return; }
+
+    if (d.type === "welcome" && !trafficKey) {
+      try {
+        await completeHandshake(kp.privateKey, alg, d);
+      } catch (err) {
+        setStatus("HANDSHAKE FAILED", "bad");
+        systemMsg("Could not establish an encrypted channel. Reload the page.");
+        ws.close();
+        return;
+      }
+      myNick = nick;
+      await sendSecure({type: "join", nick: nick, password_hash: passwordHash});
+      setStatus("ENCRYPTED · " + alg, "");
+      return;
+    }
+
+    // Past the handshake nothing unencrypted is accepted, so a host that
+    // stopped encrypting cannot silently downgrade the session.
+    if (d.type !== "encrypted" || !trafficKey) return;
+    try {
+      handle(await openEvent(d));
+    } catch (err) {
+      /* forged or corrupted frame — ignore it */
+    }
+  };
+  ws.onclose = () => {
+    setStatus("DISCONNECTED", "bad");
+    input.disabled = true; sendBtn.disabled = true; $("renew").disabled = true;
+    systemMsg("Disconnected. Reload the page to rejoin.");
+  };
+  ws.onerror = () => {
+    if (!myNick) {
+      $("join-err").textContent = "Connection failed. Reload the page.";
+      $("join-btn").disabled = false;
+    }
+    setStatus("CONNECTION ERROR", "bad");
+  };
+
+  joinView.style.display = "none";
+  app.classList.add("on");
+  setStatus("CONNECTING…", "warn");
+  input.focus();
+}
+
+async function send() {
+  const text = input.value.trim();
+  if (!text || !trafficKey) return;
+  const msgId = crypto.randomUUID();
+  mine.add(msgId);
+  const payload = {type: "chat", content: text, msg_id: msgId};
+  if (replyTo) {
+    payload.reply_to_nick = replyTo.nick;
+    payload.reply_to_content = replyTo.content.slice(0, 200);
+  }
+  await sendSecure(payload);
+  messageRow(myNick, msgId, {
+    text: text,
+    replyNick: replyTo ? replyTo.nick : null,
+    replyContent: replyTo ? replyTo.content : null,
+  });
+  input.value = "";
+  input.style.height = "auto";
+  cancelReply();
+  stopTyping();
+}
+
+/* ── Wiring ──────────────────────────────────────────────────────── */
+
+$("banner-x").addEventListener("click", () => { $("banner").style.display = "none"; });
+$("join-btn").addEventListener("click", join);
+$("nick").addEventListener("keydown", e => { if (e.key === "Enter") join(); });
+$("pass").addEventListener("keydown", e => { if (e.key === "Enter") join(); });
+sendBtn.addEventListener("click", send);
+$("reply-x").addEventListener("click", cancelReply);
+
+$("mic").addEventListener("click", toggleRecording);
+$("blur-toggle").addEventListener("click", toggleBlur);
+
+// ── Attachments: picker + drag and drop ──
+$("attach").addEventListener("click", () => $("file-input").click());
+$("file-input").addEventListener("change", e => {
+  const f = e.target.files && e.target.files[0];
+  if (f) sendFile(f);
+  e.target.value = "";                  // let the same file be picked again
+});
+
+const dropHint = $("drop-hint");
+let dragDepth = 0;
+["dragenter", "dragover"].forEach(evt =>
+  document.addEventListener(evt, e => {
+    if (!trafficKey || !app.classList.contains("on")) return;
+    e.preventDefault();
+    if (evt === "dragenter") dragDepth++;
+    dropHint.classList.add("on");
+  }));
+document.addEventListener("dragleave", () => {
+  if (--dragDepth <= 0) { dragDepth = 0; dropHint.classList.remove("on"); }
+});
+document.addEventListener("drop", e => {
+  if (!trafficKey || !app.classList.contains("on")) return;
+  e.preventDefault();
+  dragDepth = 0;
+  dropHint.classList.remove("on");
+  const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) sendFile(f);
+});
+
+input.addEventListener("input", () => {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 120) + "px";
+  if (!amTyping && trafficKey) {
+    amTyping = true;
+    sendSecure({type: "typing", state: true});
+  }
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(stopTyping, 3000);
+});
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  else if (e.key === "Escape") cancelReply();
+});
+
+// Roster drawer (phones only; it is always on screen at desktop widths).
+const roster = $("roster"), backdrop = $("backdrop");
+function closeRoster() { roster.classList.remove("open"); backdrop.classList.remove("on"); }
+$("roster-btn").addEventListener("click", () => {
+  roster.classList.add("open"); backdrop.classList.add("on");
+});
+$("roster-close").addEventListener("click", closeRoster);
+backdrop.addEventListener("click", closeRoster);
+
+$("renew").addEventListener("click", async () => {
+  const btn = $("renew"), note = $("renew-note");
+  btn.disabled = true; btn.classList.add("spin"); note.textContent = "";
+  try {
+    const r = await fetch("/api/renew", {method: "POST"});
+    if (r.ok) {
+      note.textContent = "Circuit renewed";
+      systemMsg("⟳ Tor circuit renewed — the session stayed up");
+    } else {
+      note.textContent = "Renewal unavailable";
+    }
+  } catch (e) {
+    note.textContent = "Renewal failed";
+  } finally {
+    setTimeout(() => {
+      btn.disabled = false; btn.classList.remove("spin");
+      setTimeout(() => { note.textContent = ""; }, 3000);
+    }, 1100);
+  }
+});
+</script>
+</body>
+</html>

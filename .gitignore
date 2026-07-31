@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Build / packaging
+*.egg-info/
+dist/
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AppImage build artifacts — keep the script, ignore generated/downloaded files
+build/*
+!build/build_appimage.sh
+build/squashfs-root/
+*.AppImage
+
+# Installer leftovers
+installer/*.log
+
+# Packaged build artifacts (release binaries, not source)
+dist-pkg/

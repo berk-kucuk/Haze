@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "haze"
+version = "2.11.1"
+description = "Anonymous encrypted P2P chat — Haze Protocol"
+requires-python = ">=3.11"
+dependencies = [
+    # QtMultimedia (inline audio playback for voice notes) ships inside the
+    # base PyQt6 wheel — there is no separate PyQt6-QtMultimedia distribution.
+    "PyQt6>=6.6.0",
+    "stem>=1.8.2",
+    "cryptography>=42.0.0",
+    "python-socks[asyncio]>=2.4.4",
+    "qrcode>=8.0",
+    "sounddevice>=0.4.6",
+    "numpy>=1.26",
+    "aiohttp>=3.9",
+]
+
+[project.scripts]
+haze = "haze.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+haze = ["assets/*.png", "assets/*.svg", "assets/web/*"]
