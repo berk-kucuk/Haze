@@ -10,14 +10,16 @@ Haze is a peer-to-peer group chat application that routes all traffic through th
 
 <table>
   <tr>
-    <td align="center"><b>Login</b></td>
+    <td align="center"><b>Host</b></td>
+    <td align="center"><b>Join</b></td>
     <td align="center"><b>Chat</b></td>
     <td align="center"><b>Protocol Info</b></td>
   </tr>
   <tr>
-    <td><img src="screenshots/login.png" width="280"/></td>
-    <td><img src="screenshots/ui.png" width="280"/></td>
-    <td><img src="screenshots/protocol.png" width="280"/></td>
+    <td><img src="screenshots/login_host.png" width="220"/></td>
+    <td><img src="screenshots/login_join.png" width="220"/></td>
+    <td><img src="screenshots/ui.png" width="220"/></td>
+    <td><img src="screenshots/protocol.png" width="220"/></td>
   </tr>
 </table>
 
@@ -35,6 +37,7 @@ Haze is a peer-to-peer group chat application that routes all traffic through th
 - **Zero logs** — no message history, no connection logs, no IP addresses stored at any point
 - **Circuit renewal** — rotate Tor circuits on demand without dropping active sessions or disconnecting any participants
 - **Secret Vault** — save encrypted session transcripts locally, protected by a separate vault password; supports a duress (decoy) password that silently wipes all saved sessions
+- **Message privacy blur** — optionally blur message bubbles and file attachments at rest; click to reveal, re-blurs automatically after a few seconds
 
 ### Chat
 - **Multi-session tabs** — run multiple independent host or join sessions simultaneously in one window
