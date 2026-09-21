@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "haze"
-version = "2.11.1"
+version = "2.12.0"
 description = "Anonymous encrypted P2P chat — Haze Protocol"
 requires-python = ">=3.11"
 dependencies = [

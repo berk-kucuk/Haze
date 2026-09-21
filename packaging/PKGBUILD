@@ -1,25 +1,22 @@
 # Maintainer: Berk Kucuk <berkkucukk@proton.me>
 pkgname=haze
-pkgver=2.11.1
+pkgver=2.12.0
 pkgrel=1
 pkgdesc="Anonymous encrypted P2P chat over the Tor network"
 arch=('x86_64')
 url="https://github.com/berk-kucuk/Haze"
 license=('GPL-3.0-only')
-makedepends=(
-    'python-setuptools'
-    'python-wheel'
-)
+# Python libraries (PyQt6, stem, cryptography, aiohttp, sounddevice, …) come
+# from maze-python, the shared Maze venv at /opt/maze/venv. This package ships
+# only its own source tree and runs it with that interpreter.
 depends=(
-    'python>=3.11'
+    'maze-python'
     'tor'
-    'portaudio'
 )
 optdepends=(
     'obfs4proxy: obfs4 bridges, for networks that block Tor'
     'snowflake: snowflake bridges, for networks that block obfs4 too'
 )
-options=('!strip')
 # LOCAL BUILD: the source tarball is generated from the local working tree by
 # ../build-pkg.sh (NOT fetched from GitHub). To publish to the AUR, restore the
 # github archive::URL source and the real sha256sums.
@@ -28,36 +25,22 @@ sha256sums=('SKIP')
 
 _install_dir="/opt/${pkgname}"
 
-build() {
-    cd "Haze-${pkgver}"
-
-    # Create self-contained venv and install all Python dependencies via pip
-    python -m venv "${srcdir}/venv"
-    "${srcdir}/venv/bin/pip" install --upgrade pip --quiet
-    "${srcdir}/venv/bin/pip" install . --quiet
-
-    # Rewrite build-time paths to final install location in venv entry-point scripts
-    grep -rlI "${srcdir}/venv" "${srcdir}/venv/bin/" \
-        | xargs -r sed -i "s|${srcdir}/venv|${_install_dir}/venv|g"
-    sed -i "s|${srcdir}/venv|${_install_dir}/venv|g" \
-        "${srcdir}/venv/pyvenv.cfg"
-
-    # Remove Python's Unicode easter-egg symlink (𝜋thon); bsdtar cannot
-    # encode its name and emits a warning during packaging.
-    find "${srcdir}/venv/bin/" -name '*𝜋*' -delete
-}
-
 package() {
     local _src="${srcdir}/Haze-${pkgver}"
 
-    # Bundle the self-contained venv
+    # The application: the `haze` package as a plain directory tree, importable
+    # with /opt/haze on sys.path (assets resolve via __file__, so nothing needs
+    # pip's package-data machinery).
     install -dm755 "${pkgdir}${_install_dir}"
-    cp -a "${srcdir}/venv" "${pkgdir}${_install_dir}/venv"
+    cp -r "${_src}/src/haze" "${pkgdir}${_install_dir}/haze"
+    find "${pkgdir}${_install_dir}" -type d -name __pycache__ -prune -exec rm -rf {} +
+    install -m644 "${_src}/haze_transparent_logo.png" "${pkgdir}${_install_dir}/" 2>/dev/null || true
 
-    # /usr/bin launcher
+    # /usr/bin launcher — the shared interpreter, this tree on the path.
     install -Dm755 /dev/stdin "${pkgdir}/usr/bin/${pkgname}" <<'EOF'
 #!/usr/bin/env bash
-exec /opt/haze/venv/bin/haze "$@"
+export PYTHONPATH="/opt/haze${PYTHONPATH:+:$PYTHONPATH}"
+exec /opt/maze/venv/bin/python3 -m haze "$@"
 EOF
 
     # Desktop entry

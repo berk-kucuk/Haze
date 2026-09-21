@@ -210,15 +210,18 @@ done
 
 # ── Python environment ───────────────────────────────────────────────
 echo -e "${CYAN}Setting up Python virtual environment...${NC}"
-if ! python3 -m venv "$INSTALL_DIR/venv" 2>/tmp/haze-venv-err; then
-    cat /tmp/haze-venv-err >&2
+# mktemp, not a fixed /tmp name: a predictable path in a world-writable
+# directory can be pre-created as a symlink by any other local account, and
+# this redirect would then write through it.
+VENV_ERR="$(mktemp -t haze-venv-err.XXXXXXXX)"
+trap 'rm -f "$VENV_ERR"' EXIT
+if ! python3 -m venv "$INSTALL_DIR/venv" 2>"$VENV_ERR"; then
+    cat "$VENV_ERR" >&2
     echo -e "${RED}Error: failed to create the virtual environment.${NC}"
     echo "  This usually means the 'venv' module is missing (Debian/Ubuntu ship it"
     echo "  in a separate 'python3-venv' package). Install it and re-run this script."
-    rm -f /tmp/haze-venv-err
     exit 1
 fi
-rm -f /tmp/haze-venv-err
 "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
 "$INSTALL_DIR/venv/bin/pip" install --quiet -e "$PROJECT_DIR"
 echo -e "${GREEN}Python packages installed.${NC}"
