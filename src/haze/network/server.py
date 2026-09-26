@@ -294,9 +294,17 @@ class ChatServer:
                     await proto.send_msg(writer, {"type": "auth_failed"})
                     return
 
-            # Deduplicate nick
+            # Deduplicate nick. The suffix used to be len(clients)+1, taken
+            # once and never re-checked, so after someone left it could name a
+            # user who was still here ("bob", "carol", "bob_3"; carol leaves;
+            # the next "bob" became "bob_3" too) — overwriting that user's
+            # entry, message queue and writer task, and letting the newcomer
+            # speak under an identity nobody could tell apart. Probe until free.
             if nick in self._clients or nick == self._host_nick:
-                nick = f"{nick}_{len(self._clients)+1}"
+                base, n = nick, 2
+                while nick in self._clients or nick == self._host_nick:
+                    nick = f"{base}_{n}"
+                    n += 1
 
             # Step 2: ECDH + wrap session key
             wrapped = self._crypto.wrap_session_key(client_pub)
