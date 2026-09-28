@@ -186,65 +186,60 @@ obfs4 and Snowflake bridges ship built in, and any of the methods accepts pasted
 
 ## Installation
 
-### AppImage (recommended — no Python required)
+### From the Maze repository
 
-Download the latest `Haze-x86_64.AppImage` from the [releases page](https://haze.berkkucukk.com):
-
-```bash
-chmod +x Haze-x86_64.AppImage
-./Haze-x86_64.AppImage
-```
-
-Tor must be installed separately:
-
-| Distribution | Command |
-|---|---|
-| Arch Linux | `sudo pacman -S tor` |
-| Ubuntu / Debian | `sudo apt install tor` |
-| Fedora | `sudo dnf install tor` |
-
-### From source
-
-#### Arch Linux
+**On Maze Linux** the repository is already configured:
 
 ```bash
-sudo pacman -S tor
-git clone <repository-url>
-cd haze
-bash installer/install.sh
+sudo pacman -S haze
 ```
 
-#### Ubuntu / Debian
+**On Arch Linux and Arch-based distributions**, add the repository once:
+
+1. Import and trust the Maze signing key:
+
+   ```bash
+   curl -O https://mazerepo.berkkucukk.com.tr/packages/mazelinux.gpg
+   gpg --show-keys --with-fingerprint mazelinux.gpg
+   sudo pacman-key --add mazelinux.gpg
+   sudo pacman-key --lsign-key 7C4D515A6B930CB04794CEF6147C8159B3E2EE5F
+   ```
+
+   The fingerprint `gpg` prints must be `7C4D 515A 6B93 0CB0 4794  CEF6 147C 8159 B3E2 EE5F`.
+
+2. Add the repository to the end of `/etc/pacman.conf`:
+
+   ```ini
+   [mazelinux]
+   SigLevel = Required DatabaseOptional
+   Server = https://mazerepo.berkkucukk.com.tr/packages
+   ```
+
+3. Sync and install:
+
+   ```bash
+   sudo pacman -Syu haze
+   ```
+
+Optionally install `mazelinux-keyring` as well; it keeps the signing key up to date through pacman.
+
+Remove with `sudo pacman -Rns haze`.
+
+### Build from source
+
+The package is built from this working tree by `build-pkg.sh` and installed with pacman, exactly like the published one:
 
 ```bash
-sudo apt install tor
-git clone <repository-url>
-cd haze
-bash installer/install.sh
+sudo pacman -S --needed base-devel git
+git clone https://github.com/berk-kucuk/Haze.git
+cd Haze
+sudo pacman -S --needed $(bash -c 'source packaging/PKGBUILD; echo "${depends[@]}" "${makedepends[@]}"')
+./build-pkg.sh --install
 ```
 
-#### Fedora
+Without `--install` the package is only built, into `dist-pkg/`.
 
-```bash
-sudo dnf install tor
-git clone <repository-url>
-cd haze
-bash installer/install.sh
-```
-
-The installer creates a Python virtual environment at `~/.local/share/haze/venv`, installs a launcher at `~/.local/bin/haze`, and registers a desktop entry so Haze appears in the application menu.
-
-If `~/.local/bin` is not in your `PATH`, add this to your shell configuration:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-### Uninstall
-
-```bash
-bash installer/install.sh --uninstall
-```
+`maze-python` (the shared Python runtime) comes from the Maze repository, so add the repository first (steps 1–2 above).
 
 ---
 
@@ -313,15 +308,9 @@ The vault stores encrypted session transcripts locally. Access it from the sideb
 
 ---
 
-## Building the AppImage
+## Development
 
-```bash
-bash build/build_appimage.sh
-```
-
-Requires: `curl`, `tar`, `python3` (any version). Downloads a self-contained Python 3.11 runtime and bundles all dependencies. The output is `Haze-x86_64.AppImage` in the project root.
-
-## Building from source (development)
+Run straight from a checkout in a virtual environment:
 
 ```bash
 python -m venv .venv
