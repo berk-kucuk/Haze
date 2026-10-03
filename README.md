@@ -2,6 +2,8 @@
 
 **Anonymous · Encrypted · No Trace**
 
+*Developed for [Maze Linux](https://github.com/berk-kucuk/MazeLinux)*
+
 Haze is a peer-to-peer group chat application that routes all traffic through the Tor network. Every session is ephemeral: no accounts, no logs, no persistent keys, no metadata stored anywhere. When the session ends, nothing remains.
 
 ---
@@ -362,3 +364,9 @@ haze/
 Haze is provided for research and educational purposes. It is designed to demonstrate privacy-preserving communication techniques. The authors make no warranties regarding the security of this software. Users are responsible for understanding the legal implications of using anonymity tools in their jurisdiction.
 
 Tor provides strong anonymity guarantees at the network layer, but no software can protect against a compromised endpoint, a malicious host, or physical access to the device.
+
+## License
+
+Copyright © 2026 Berk Küçük
+
+Released under the GNU Affero General Public License v3.0 — see [LICENSE](LICENSE).

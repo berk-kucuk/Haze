@@ -59,6 +59,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "tray_panic":       "⚠ PANIC",
         "tray_quit":        "Quit Session",
         "tray_hidden":      "Haze is running in the system tray.",
+        "for_maze_linux":   "for Maze Linux",
         # Notifications
         "new_message_notification": "New message received",
         # Settings
@@ -275,6 +276,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "tray_panic":       "⚠ PANİK",
         "tray_quit":        "Oturumu Kapat ve Çık",
         "tray_hidden":      "Sistem tepsisinde çalışmaya devam ediyor.",
+        "for_maze_linux":   "Maze Linux için",
         # Bildirimler
         "new_message_notification": "Yeni mesaj alındı",
         # Ayarlar

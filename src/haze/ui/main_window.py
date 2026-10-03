@@ -626,6 +626,7 @@ class _TitleBar(QWidget):
                 "font-size:15px;font-weight:800;color:#ffffff;letter-spacing:5px;"
             )
         lay.addWidget(logo, 0, _vc)
+        lay.addWidget(maze_linux_tag(t("for_maze_linux")), 0, _vc)
         lay.addSpacing(8)
 
         # Protocol badge — clickable, opens info popup
@@ -4419,3 +4420,18 @@ class MainWindow(QMainWindow):
         _cleanup_audio_tmp_files()
         self.tor.cleanup()
         QApplication.quit()
+
+
+def maze_linux_tag(text: str, size_px: int = 10):
+    """The small "for Maze Linux" line beside the app name. It takes the
+    surrounding text colour and fades it, so it reads right in every theme."""
+    from PyQt6.QtWidgets import QGraphicsOpacityEffect, QLabel
+    from PyQt6.QtCore import Qt
+    tag = QLabel(text)
+    tag.setObjectName("mazeLinuxTag")
+    tag.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    tag.setStyleSheet(f"font-size: {size_px}px; background: transparent;")
+    fade = QGraphicsOpacityEffect(tag)
+    fade.setOpacity(0.55)
+    tag.setGraphicsEffect(fade)
+    return tag

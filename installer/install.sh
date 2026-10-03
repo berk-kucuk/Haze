@@ -259,7 +259,7 @@ ICON_PATH="$PIXMAP_DIR/$APP.png"
 cat > "$DESKTOP_DIR/$APP.desktop" <<DESKTOP_EOF
 [Desktop Entry]
 Name=Haze
-Comment=Anonymous encrypted P2P chat over Tor — E2E encrypted, no logs
+Comment=Anonymous encrypted P2P chat over Tor — E2E encrypted, no logs — for Maze Linux
 Exec=$BIN_DIR/$APP
 Icon=$ICON_PATH
 Terminal=false
