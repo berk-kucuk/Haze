@@ -16,6 +16,8 @@ import base64
 import hashlib
 import hmac
 import itertools
+import time
+from collections import deque
 from typing import Callable
 
 from ..crypto.e2e import SessionCrypto
@@ -45,6 +47,41 @@ def _hash_password(password: str) -> str:
     return hashlib.sha256(b"haze-session-v1:" + password.encode()).hexdigest()
 
 
+class _PasswordThrottle:
+    """Online-guessing brake for the session password.
+
+    Both join paths (native TCP and the browser gateway) used to accept an
+    unlimited stream of reconnect-and-guess attempts from anyone who knew the
+    onion address. Every failure now makes the next check wait longer (2, 4,
+    8, 16, then 30 s), and after MAX_FAILS failures inside WINDOW seconds
+    password joins are refused until old failures age out. Shared by both paths
+    so they cannot be played against each other.
+    """
+
+    WINDOW = 600.0
+    MAX_FAILS = 20
+
+    def __init__(self) -> None:
+        self._fails: deque[float] = deque()
+
+    def _prune(self) -> None:
+        now = time.monotonic()
+        while self._fails and now - self._fails[0] > self.WINDOW:
+            self._fails.popleft()
+
+    def locked(self) -> bool:
+        self._prune()
+        return len(self._fails) >= self.MAX_FAILS
+
+    def delay(self) -> float:
+        self._prune()
+        n = len(self._fails)
+        return 0.0 if n == 0 else float(min(2 ** min(n, 5), 30))
+
+    def failed(self) -> None:
+        self._fails.append(time.monotonic())
+
+
 class ChatServer:
     def __init__(
         self,
@@ -57,6 +94,7 @@ class ChatServer:
         self._local_port = local_port
         self._on_event = on_event
         self._session_password_hash = _hash_password(session_password)
+        self._pw_throttle = _PasswordThrottle()
 
         self._crypto = SessionCrypto()
         self._crypto.generate_session_key()
@@ -288,9 +326,14 @@ class ChatServer:
 
             # Step 1b: password check (if session is protected)
             if self._session_password_hash:
+                if self._pw_throttle.locked():
+                    await proto.send_msg(writer, {"type": "auth_failed"})
+                    return
+                await asyncio.sleep(self._pw_throttle.delay())
                 if not hmac.compare_digest(
-                    hello.get("password_hash", ""), self._session_password_hash
+                    str(hello.get("password_hash", "")), self._session_password_hash
                 ):
+                    self._pw_throttle.failed()
                     await proto.send_msg(writer, {"type": "auth_failed"})
                     return
 

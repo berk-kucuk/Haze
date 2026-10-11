@@ -214,10 +214,18 @@ class WebChatServer:
                     if mtype == "join" and nick is None:
                         # Password check before admitting
                         if self._session_password_hash:
+                            # Same brake as the native path (shared state).
+                            throttle = self._chat_server._pw_throttle
+                            if throttle.locked():
+                                await send({"type": "auth_failed"})
+                                await ws.close()
+                                return ws
+                            await asyncio.sleep(throttle.delay())
                             if not hmac.compare_digest(
                                 str(data.get("password_hash", "")),
                                 self._session_password_hash,
                             ):
+                                throttle.failed()
                                 await send({"type": "auth_failed"})
                                 await ws.close()
                                 return ws

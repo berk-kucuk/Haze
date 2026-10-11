@@ -1,6 +1,6 @@
 # Maintainer: Berk Kucuk <berkkucukk@proton.me>
 pkgname=haze
-pkgver=2.12.1
+pkgver=2.12.2
 pkgrel=1
 pkgdesc="Anonymous encrypted P2P chat over the Tor network — for Maze Linux"
 arch=('x86_64')
