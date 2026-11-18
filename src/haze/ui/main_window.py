@@ -62,6 +62,25 @@ from ..network.protocol import MAX_FILE_BYTES, MAX_FILE_CHUNKS  # noqa: E402
 # to exhaust a peer's memory without ever finishing a transfer.
 MAX_INFLIGHT_TRANSFERS = 16
 
+
+def _plain(label: "QLabel") -> "QLabel":
+    """Show the label's text exactly as written.
+
+    QLabel's default, Qt.AutoText, renders anything that looks like HTML as
+    HTML. For text a peer controls — messages, nicks, file names — that let any
+    participant send styled text, links, local images (<img src="/…">) or a
+    fake system line ("⚠ host pressed panic…") that looked like Haze's own.
+    """
+    label.setTextFormat(Qt.TextFormat.PlainText)
+    return label
+
+
+def _notification_safe(text: str) -> str:
+    """Desktop notifications (KDE's included) render a little HTML in the body.
+    Swap the markup characters for look-alikes rather than escaping them: a
+    server without markup support would show "&lt;" literally."""
+    return text.replace("&", "＆").replace("<", "‹").replace(">", "›")
+
 # Extensions QMediaPlayer's backend needs to reliably identify audio
 # attachments played straight from a temp file (mirrors mobile's mime-based
 # handling — see FileMessage._setup_audio below).
@@ -129,6 +148,52 @@ def _find_tor_browser() -> list[str] | None:
     return None
 
 
+_MEDIA_DIR: "str | None" = None
+
+
+def _media_dir() -> str:
+    """Where received audio/video waits for the player (audit H12).
+
+    It used to be /tmp: on disk on many systems, shared by every account, and
+    left behind when Haze crashed before the purge. Now: a directory of this
+    process's own under $XDG_RUNTIME_DIR — memory-backed, owner-only, emptied
+    by the system at logout — and directories of earlier runs that died
+    without cleaning up are removed at the next start.
+    """
+    global _MEDIA_DIR
+    if _MEDIA_DIR and os.path.isdir(_MEDIA_DIR):
+        return _MEDIA_DIR
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    base = os.path.join(runtime, "haze-media") if runtime else ""
+    try:
+        if not base:
+            raise OSError("no runtime dir")
+        os.makedirs(base, mode=0o700, exist_ok=True)
+        st = os.lstat(base)
+        import stat as _stat
+        if not _stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+            raise OSError("not ours")
+        os.chmod(base, 0o700)
+        _purge_stale_media(base)
+        mine = os.path.join(base, str(os.getpid()))
+        os.makedirs(mine, mode=0o700, exist_ok=True)
+        _MEDIA_DIR = mine
+    except OSError:
+        # Still private (mkdtemp is 0700), just not memory-backed.
+        _MEDIA_DIR = tempfile.mkdtemp(prefix="haze-media-")
+    return _MEDIA_DIR
+
+
+def _purge_stale_media(base: str) -> None:
+    """Remove the media directories of Haze processes that are gone."""
+    for name in os.listdir(base):
+        if not name.isdigit() or int(name) == os.getpid():
+            continue
+        if os.path.exists(f"/proc/{name}"):
+            continue
+        shutil.rmtree(os.path.join(base, name), ignore_errors=True)
+
+
 def _cleanup_audio_tmp_files() -> None:
     for path in list(_AUDIO_TMP_PATHS):
         try:
@@ -136,6 +201,8 @@ def _cleanup_audio_tmp_files() -> None:
         except OSError:
             pass
         _AUDIO_TMP_PATHS.discard(path)
+    if _MEDIA_DIR:
+        shutil.rmtree(_MEDIA_DIR, ignore_errors=True)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -172,10 +239,12 @@ class _NetBridge(QObject):
         self.event_received.emit(event)
 
     def start_server(self, nick: str, local_port: int, http_port: int,
-                     renew_circuit_cb=None, session_password: str = "") -> None:
+                     renew_circuit_cb=None, session_password: str = "",
+                     onion_address: str = "") -> None:
         from ..network.web_server import WebChatServer
         self._server = ChatServer(nick, local_port, self._emit,
-                                  session_password=session_password)
+                                  session_password=session_password,
+                                  onion_address=onion_address)
         asyncio.run_coroutine_threadsafe(self._server.start(), self._loop)
         self._web_server = WebChatServer(
             nick, http_port, self._server, self._qt_only_emit, self._loop,
@@ -310,8 +379,16 @@ class ChatSession:
         self.tab_btn: "QPushButton | None" = None
         self.typing_bar: "QWidget | None" = None
         self.search_bar: "QWidget | None" = None
+        # Join mode: the host's nick — first in the userlist the host sends
+        # on joining. Only the host's panic ends the session here.
+        self.host_nick: str | None = None
         # msg_id → MessageBubble, for delete/edit
         self.msg_widgets: "dict[str, QWidget]" = {}
+        # msg_id → nick of its author, for the whole session (kept after the
+        # message disappears, so an id is never handed to anyone else). Only
+        # that author's delete/edit is applied; the host stamps every event's
+        # nick with the sender's own, and never reuses a nick in a session.
+        self.msg_owners: "dict[str, str]" = {}
         # latency ping state
         self.ping_sent_at: float = 0.0
         # slogan overlay reference for fade-out
@@ -1375,7 +1452,7 @@ class MessageBubble(QWidget, _BlurMixin):
         inner.setSpacing(3)
 
         if not is_me and show_author:
-            n = QLabel(nick.upper())
+            n = _plain(QLabel(nick.upper()))
             n.setObjectName("nickLabel")
             inner.addWidget(n)
         elif is_me and show_author:
@@ -1471,7 +1548,7 @@ class MessageBubble(QWidget, _BlurMixin):
                 frame.setObjectName("codeBlock")
                 fl = QVBoxLayout(frame)
                 fl.setContentsMargins(10, 8, 10, 8)
-                lbl = QLabel(part.strip())
+                lbl = _plain(QLabel(part.strip()))
                 lbl.setObjectName("codeText")
                 lbl.setWordWrap(True)
                 lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -1480,7 +1557,7 @@ class MessageBubble(QWidget, _BlurMixin):
             else:
                 text = part.strip()
                 if text:
-                    lbl = QLabel(text)
+                    lbl = _plain(QLabel(text))
                     lbl.setObjectName("msgText")
                     lbl.setWordWrap(True)
                     lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -1558,7 +1635,7 @@ class SystemMessage(QWidget):
         lay.setContentsMargins(28, 10, 28, 10)
         lay.setSpacing(14)
         lay.addWidget(_HRule())
-        lbl = QLabel(text)
+        lbl = _plain(QLabel(text))       # carries peers' nicks
         lbl.setObjectName("systemMsg")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
@@ -1576,7 +1653,7 @@ class PanicBanner(QWidget):
         frame.setObjectName("panicBanner")
         fl = QVBoxLayout(frame)
         fl.setContentsMargins(16, 14, 16, 14)
-        lbl = QLabel(t("panic_banner").format(nick.upper()))
+        lbl = _plain(QLabel(t("panic_banner").format(nick.upper())))
         lbl.setObjectName("panicBannerText")
         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         fl.addWidget(lbl)
@@ -1632,7 +1709,7 @@ class _TypingBar(QWidget):
         self.setFixedHeight(26)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(24, 4, 24, 4)
-        self._lbl = QLabel("")
+        self._lbl = _plain(QLabel(""))  # "<nick> is typing…"
         self._lbl.setObjectName("typingLabel")
         lay.addWidget(self._lbl)
         self._timer = QTimer(self)
@@ -1949,7 +2026,7 @@ class FileMessage(QWidget, _BlurMixin):
         inner.setSpacing(5)
 
         if not is_me and show_author:
-            n = QLabel(nick.upper())
+            n = _plain(QLabel(nick.upper()))
             n.setObjectName("nickLabel")
             inner.addWidget(n)
         elif is_me and show_author:
@@ -1974,7 +2051,7 @@ class FileMessage(QWidget, _BlurMixin):
         info_row.addWidget(icon_lbl)
 
         meta = QVBoxLayout()
-        name_lbl = QLabel(filename)
+        name_lbl = _plain(QLabel(filename))
         name_lbl.setStyleSheet(
             "color: #eeeeee; font-size: 12px; font-weight: bold; background: transparent;"
         )
@@ -2126,17 +2203,13 @@ class FileMessage(QWidget, _BlurMixin):
             # GIFs), so write to a temp file named with the right extension
             # for the backend's content-type sniffing.
             ext = _AUDIO_EXTENSIONS.get(self._mime, "")
-            fd, path = tempfile.mkstemp(suffix=ext, prefix="haze_audio_")
+            fd, path = tempfile.mkstemp(suffix=ext, prefix="audio_", dir=_media_dir())
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
             _AUDIO_TMP_PATHS.add(path)
             self._audio_tmp_path = path
-
-            self._audio_output = QAudioOutput(self)
-            self._audio_player = QMediaPlayer(self)
-            self._audio_player.setAudioOutput(self._audio_output)
-            self._audio_player.setSource(QUrl.fromLocalFile(path))
-            self._audio_player.playbackStateChanged.connect(self._on_playback_state_changed)
+            # The player — and the decoder behind it — only on ▶ (see
+            # _ensure_player): a received file is not parsed unasked.
             self._play_btn.setEnabled(True)
         except Exception:
             pass
@@ -2156,18 +2229,11 @@ class FileMessage(QWidget, _BlurMixin):
                 # Unknown container: keep the extension the sender used, which
                 # is the best hint the backend's sniffing will get.
                 ext = Path(self._filename).suffix
-            fd, path = tempfile.mkstemp(suffix=ext, prefix="haze_video_")
+            fd, path = tempfile.mkstemp(suffix=ext, prefix="video_", dir=_media_dir())
             with os.fdopen(fd, "wb") as f:
                 f.write(data)
             _AUDIO_TMP_PATHS.add(path)
             self._audio_tmp_path = path
-
-            self._audio_output = QAudioOutput(self)
-            self._audio_player = QMediaPlayer(self)
-            self._audio_player.setAudioOutput(self._audio_output)
-            self._audio_player.setVideoOutput(self._video_widget)
-            self._audio_player.setSource(QUrl.fromLocalFile(path))
-            self._audio_player.playbackStateChanged.connect(self._on_playback_state_changed)
             self._play_btn.setEnabled(True)
             # Kept hidden while the bubble is blurred: a QVideoWidget paints
             # through a native surface that QGraphicsBlurEffect never touches,
@@ -2193,8 +2259,36 @@ class FileMessage(QWidget, _BlurMixin):
             if self._audio_player is not None:
                 self._video_widget.show()
 
+    def _ensure_player(self) -> bool:
+        """Create the player on the first ▶ (audit H12).
+
+        Handing the file to QMediaPlayer starts FFmpeg probing it — the
+        decoder is the part a crafted file attacks — so a received file is
+        only decoded when its user asks to play it.
+        """
+        if self._audio_player is not None:
+            return True
+        path = getattr(self, "_audio_tmp_path", None)
+        if not path:
+            return False
+        self._audio_output = QAudioOutput(self)
+        self._audio_player = QMediaPlayer(self)
+        self._audio_player.setAudioOutput(self._audio_output)
+        if self._video_widget is not None:
+            self._audio_player.setVideoOutput(self._video_widget)
+            # Kept hidden while blurred: a QVideoWidget paints through a native
+            # surface that QGraphicsBlurEffect never touches.
+            if not getattr(self, "_blurred", False):
+                self._video_widget.show()
+        self._audio_player.setSource(QUrl.fromLocalFile(path))
+        self._audio_player.playbackStateChanged.connect(self._on_playback_state_changed)
+        return True
+
     def _toggle_playback(self) -> None:
-        if not self._audio_player:
+        try:
+            if not self._ensure_player():
+                return
+        except Exception:
             return
         try:
             if self._audio_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -2637,6 +2731,7 @@ class _VaultPopup(_Popup):
         settings = self._main_win._settings
 
         if check_decoy(pw, settings.get("vault_decoy_hash", "")):
+            self._upgrade_legacy_hashes(pw, settings, key="vault_decoy_hash")
             self._decoy_mode = True
             for s in _app_vault.list_sessions():
                 _app_vault.delete_session(s["path"])
@@ -2651,20 +2746,23 @@ class _VaultPopup(_Popup):
         else:
             self._lock_err.setText(t("vault_lock_wrong"))
 
-    def _upgrade_legacy_hashes(self, password: str, settings: dict) -> None:
-        """Re-hash a PBKDF2-era lock password with scrypt, now that we have it.
+    def _upgrade_legacy_hashes(self, password: str, settings: dict,
+                               key: str = "vault_lock_hash") -> None:
+        """Re-hash a fixed-salt lock (or decoy) hash, now that we have its password.
 
-        Existing users keep their password; only the stored digest changes, so a
-        vault copied off the device stops being cheap to crack. The decoy hash
-        can't be upgraded here — verifying it takes the *decoy* password, which
-        by definition isn't the one just entered.
+        Existing users keep their password; only the stored digest changes —
+        to scrypt with a salt of its own — so a settings file copied off the
+        device stops being cheap to crack. Each hash is upgraded when its own
+        password is entered: the lock's on a normal unlock, the decoy's when
+        the decoy is used (re-saving settings shows nothing on screen).
         """
-        stored = settings.get("vault_lock_hash", "")
+        stored = settings.get(key, "")
         if not is_legacy_hash(stored):
             return
-        settings["vault_lock_hash"] = make_lock_hash(password)
+        make = make_decoy_hash if key == "vault_decoy_hash" else make_lock_hash
+        settings[key] = make(password)
         _app_settings.save(settings)
-        log.info("vault lock hash upgraded to scrypt")
+        log.info("%s upgraded to salted scrypt", key)
 
     # ── Page helpers ──────────────────────────────────────────────────
 
@@ -2974,7 +3072,7 @@ class _VaultPopup(_Popup):
 
         participants = ", ".join(data.get("participants", []))
         if participants:
-            p_lbl = QLabel(participants)
+            p_lbl = _plain(QLabel(participants))
             p_lbl.setStyleSheet("color: #606060; font-size: 11px;")
             self._view_inner_lay.addWidget(p_lbl)
 
@@ -3004,11 +3102,11 @@ class _VaultPopup(_Popup):
             b_lay.setContentsMargins(12, 8, 12, 6)
             b_lay.setSpacing(3)
 
-            n_lbl = QLabel(nick.upper())
+            n_lbl = _plain(QLabel(nick.upper()))
             n_lbl.setObjectName("nickLabel")
             b_lay.addWidget(n_lbl)
 
-            c_lbl = QLabel(content)
+            c_lbl = _plain(QLabel(content))
             c_lbl.setObjectName("msgText")
             c_lbl.setWordWrap(True)
             c_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -3559,7 +3657,7 @@ class MainWindow(QMainWindow):
         reply_prefix = QLabel(t("reply_to") + ":")
         reply_prefix.setObjectName("replyBarLabel")
         rb_lay.addWidget(reply_prefix)
-        reply_nick_lbl = QLabel("")
+        reply_nick_lbl = _plain(QLabel(""))   # "<nick>  —  <their message>"
         reply_nick_lbl.setObjectName("replyBarNick")
         rb_lay.addWidget(reply_nick_lbl)
         rb_lay.addStretch()
@@ -3644,6 +3742,7 @@ class MainWindow(QMainWindow):
                 session.nick, session.local_port, session.http_port,
                 renew_circuit_cb=self.tor.renew_circuit,
                 session_password=session.session_password,
+                onion_address=session.onion_url,
             )
         else:
             self._append_system(session, t("connecting_to").format(session.onion_url))
@@ -3673,10 +3772,16 @@ class MainWindow(QMainWindow):
             if session is self._active:
                 self._title_bar.set_badge(t("protocol_active"), active=True)
         elif kind == "chat":
+            msg_id = event.get("msg_id", "")
+            # A msg_id names one message for the whole session. A second message
+            # claiming a known id — someone else's, or one that has already
+            # disappeared — would become the target of that message's edits
+            # and deletes, so it is dropped.
+            if msg_id and msg_id in session.msg_owners:
+                return
             event["time"] = datetime.now().strftime("%H:%M")
             session.messages.append(event)
             is_me = event["nick"] == session.nick
-            msg_id = event.get("msg_id", "")
             # Use the sender's disappear setting from the payload only.
             # For own messages, fallback to local settings (join mode local echo).
             disappear = int(event.get("disappear_secs", 0)
@@ -3691,9 +3796,12 @@ class MainWindow(QMainWindow):
                 or prev["nick"] != event["nick"]
             )
 
-            def _on_disappear(s=session, mid=msg_id, ev=event):
-                # Send delete to all peers so the message disappears for everyone.
-                s.bridge.send_delete(mid)
+            def _on_disappear(s=session, mid=msg_id, ev=event, mine=is_me):
+                # Every client runs the same timer and removes the message
+                # locally; only its author also tells the others (a delete for
+                # someone else's message is refused everywhere anyway).
+                if mine:
+                    s.bridge.send_delete(mid)
                 w = s.msg_widgets.get(mid)
                 if w:
                     s.msg_layout.removeWidget(w)
@@ -3717,6 +3825,7 @@ class MainWindow(QMainWindow):
             )
             if msg_id:
                 session.msg_widgets[msg_id] = bubble
+                session.msg_owners[msg_id] = event["nick"]
             # Clear typing indicator when message arrives
             if session.typing_bar and not is_me:
                 session.typing_bar.clear_nick(event["nick"])
@@ -3730,7 +3839,10 @@ class MainWindow(QMainWindow):
             self._remove_user_from_list(session, event["nick"])
             self._append_system(session, t("left").format(event["nick"]))
         elif kind == "userlist":
-            for u in event.get("users", []):
+            users = event.get("users", [])
+            if session.mode == "join" and session.host_nick is None and users:
+                session.host_nick = users[0]
+            for u in users:
                 if u != session.nick:
                     self._add_user_to_list(session, u)
         elif kind == "panic":
@@ -3739,11 +3851,12 @@ class MainWindow(QMainWindow):
                 # I pressed panic — full wipe dialog.
                 self._append_system(session, t("panic_triggered"))
                 self._show_panic_dialog(nick)
-            elif session.mode == "host":
-                # A client panicked — session continues, just notify.
+            elif session.mode == "host" or nick != session.host_nick:
+                # A guest panicked — that guest is gone, the session goes on.
+                # (Older hosts still relay a guest's panic to everyone.)
                 self._append_system(session, f"⚠ {nick} pressed panic and left")
             else:
-                # Host or another client panicked — I should leave.
+                # The host panicked — the session is over; I should leave.
                 self._append_system(session, t("panic_triggered_by").format(nick))
                 self._append_widget(session, PanicBanner(nick), animate=True)
                 self._show_panic_dialog(nick)
@@ -3782,6 +3895,10 @@ class MainWindow(QMainWindow):
 
         elif kind == "delete":
             msg_id = event.get("msg_id", "")
+            # Only the author may delete a message. Anyone can see a msg_id, so
+            # without this any participant could wipe anyone's message.
+            if not msg_id or session.msg_owners.get(msg_id) != event.get("nick"):
+                return
             # Only apply from event if it came from someone else
             # (own deletions are applied immediately in _request_delete)
             if event.get("nick") != session.nick:
@@ -3796,6 +3913,10 @@ class MainWindow(QMainWindow):
 
         elif kind == "edit":
             msg_id = event.get("msg_id", "")
+            # Only the author may edit a message — otherwise anyone could put
+            # words in someone else's mouth, shown under that person's name.
+            if not msg_id or session.msg_owners.get(msg_id) != event.get("nick"):
+                return
             new_content = event.get("content", "")
             if event.get("nick") != session.nick:
                 w = session.msg_widgets.get(msg_id)
@@ -3835,6 +3956,10 @@ class MainWindow(QMainWindow):
                 return
             if len(session.file_buffers) >= MAX_INFLIGHT_TRANSFERS:
                 return
+            # The first sender keeps a file_id: a second file_start with the
+            # same id would otherwise replace someone's transfer in flight.
+            if fid in session.file_buffers:
+                return
             # Group: only show author if previous message is from a different sender
             prev = session.messages[-1] if session.messages else None
             show_author = (
@@ -3852,6 +3977,8 @@ class MainWindow(QMainWindow):
                 show_author=show_author,
             )
             session.file_buffers[fid] = {
+                # Chunks and the end are accepted from this sender only.
+                "nick": event.get("nick"),
                 "chunks": {},
                 "total_chunks": total_chunks,
                 "bytes": 0,
@@ -3861,7 +3988,10 @@ class MainWindow(QMainWindow):
         elif kind == "file_chunk":
             fid = event["file_id"]
             buf = session.file_buffers.get(fid)
-            if buf is None:
+            # file_ids are visible to everyone: a chunk from anyone but the
+            # transfer's own sender would let them splice content into
+            # someone else's file (first chunk at an index wins).
+            if buf is None or buf["nick"] != event.get("nick"):
                 return
             # Bound what a chunk may claim before storing it. Without this a peer
             # could declare a one-chunk file (passing the file_start caps) and
@@ -3889,9 +4019,19 @@ class MainWindow(QMainWindow):
             buf["widget"].update_progress(len(buf["chunks"]), buf["total_chunks"])
         elif kind == "file_end":
             fid = event["file_id"]
-            buf = session.file_buffers.pop(fid, None)
+            buf = session.file_buffers.get(fid)
+            # Only the sender may finish (or, finishing early, truncate) it.
+            if buf is None or buf["nick"] != event.get("nick"):
+                return
+            session.file_buffers.pop(fid, None)
             if buf:
                 total = buf["total_chunks"]
+                # A missing chunk used to be filled with nothing, silently
+                # turning the file into a shorter, different one.
+                if len(buf["chunks"]) != total:
+                    log.warning("file transfer ended with %d of %d chunks; dropped",
+                                len(buf["chunks"]), total)
+                    return
                 try:
                     data = b"".join(
                         base64.b64decode(buf["chunks"].get(i, "")) for i in range(total)
@@ -3908,7 +4048,7 @@ class MainWindow(QMainWindow):
         if not self._settings.get("notifications_enabled", True):
             return
         msg = f"{nick}: {content}" if self._settings.get("notifications_show_content", True) else t("new_message_notification")
-        self._tray.showMessage("Haze", msg)
+        self._tray.showMessage("Haze", _notification_safe(msg))
 
     # ── Settings ─────────────────────────────────────────────────────
 
@@ -4153,6 +4293,7 @@ class MainWindow(QMainWindow):
                 {"type": "chat", "nick": s.nick, "content": text, "msg_id": msg_id}
             )
             s.msg_widgets[msg_id] = bubble
+            s.msg_owners[msg_id] = s.nick
             self._append_widget(s, bubble, animate=True)
         else:
             msg_id = str(uuid.uuid4())

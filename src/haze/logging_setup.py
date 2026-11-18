@@ -1,7 +1,8 @@
 """
 Lightweight file logging for diagnosing connection / message-delivery issues.
 
-Writes to a rotating log under the user's XDG state dir (falls back to /tmp).
+Writes to a rotating log in an owner-only directory under the user's XDG state
+dir (no file at all if that cannot be made; never a shared location like /tmp).
 Set HAZE_LOG=<path> to override the location.
 
 PRIVACY: this file outlives the session, so what reaches it is deliberately
@@ -37,25 +38,34 @@ def redact(value: str | None) -> str:
     return f"{text[:4]}…({len(text)})"
 
 
-def _default_log_path() -> Path:
+def _default_log_path() -> Path | None:
+    """The log file, or None for no file log.
+
+    There used to be a fallback to /tmp/haze.log when the state directory
+    could not be made (audit H11): a fixed name in a directory every account
+    writes to, so another user could plant a symlink there first — and the
+    file came out with the default umask, readable by everyone. Without our
+    own private directory there is no log file; stderr still gets the lines.
+    """
     override = os.environ.get("HAZE_LOG")
     if override:
         return Path(override)
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
     d = Path(base) / "haze"
     try:
-        d.mkdir(parents=True, exist_ok=True)
+        d.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(d, 0o700)
         return d / "haze.log"
     except Exception:
-        return Path("/tmp/haze.log")
+        return None
 
 
-def setup_logging() -> Path:
-    """Configure the 'haze' logger once. Returns the log file path."""
+def setup_logging() -> Path | None:
+    """Configure the 'haze' logger once. Returns the log file path (None: no file)."""
     global _configured
     logger = logging.getLogger(_LOGGER_NAME)
     if _configured:
-        return Path(getattr(logger, "_haze_path", _default_log_path()))
+        return getattr(logger, "_haze_path", None)
 
     # Debug output is opt-in rather than opt-out: the default file log keeps
     # warnings and errors (so a crash is still explainable) but not the
@@ -67,6 +77,11 @@ def setup_logging() -> Path:
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s",
                             datefmt="%H:%M:%S")
     try:
+        if path is None:
+            raise OSError("no private log directory")
+        # Owner-only from the first byte, whatever the umask.
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600))
+        os.chmod(path, 0o600)
         fh = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=2, encoding="utf-8")
         fh.setFormatter(fmt)
         fh.setLevel(logging.DEBUG if debug else logging.WARNING)
@@ -81,7 +96,7 @@ def setup_logging() -> Path:
     sh = logging.StreamHandler(sys.stderr)
     sh.setFormatter(fmt)
     logger.addHandler(sh)
-    logger._haze_path = str(path)  # type: ignore[attr-defined]
+    logger._haze_path = path  # type: ignore[attr-defined]
     _configured = True
     return path
 

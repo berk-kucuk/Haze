@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Haze</title>
+  <!-- Haze: the HAZE wordmark on the Maze tile. Monoline letters on a square
+       grid, one stroke weight and one corner radius throughout. -->
+  <defs>
+    <radialGradient id="hz-glow" cx="512" cy="512" r="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.20"/>
+      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="hz-lit" x1="0" y1="411.08" x2="0" y2="612.92" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#cfcfd8"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="220" fill="#000"/>
+  <circle cx="512" cy="512" r="420" fill="url(#hz-glow)"/>
+  <path d="M93.195 411.08 V612.91 M252.63500000000005 411.08 V612.91 M93.195 511.995 H252.63500000000005 M319.24518348623855 612.91 V453.46999999999997 A21.195 21.195 0 0 1 340.44018348623854 432.275 H457.4901834862386 A21.195 21.195 0 0 1 478.6851834862386 453.46999999999997 V612.91 M319.24518348623855 511.995 H478.6851834862386 M524.1003669724771 432.275 H668.703866972477 Q704.7353669724771 432.275 679.26 457.75 L570.77 566.24 Q545.2953669724772 591.7149999999999 581.3268669724772 591.7149999999999 H725.9303669724771 M951.9805504587157 432.275 H792.5405504587158 A21.195 21.195 0 0 0 771.3455504587157 453.46999999999997 V570.5199999999999 A21.195 21.195 0 0 0 792.5405504587158 591.7149999999999 H951.9805504587157 M771.3455504587157 511.995 H951.9805504587157" fill="none" stroke="url(#hz-lit)" stroke-width="42.39" stroke-linecap="butt" stroke-linejoin="miter"/>
+</svg>

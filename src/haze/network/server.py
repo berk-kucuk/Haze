@@ -16,13 +16,17 @@ import base64
 import hashlib
 import hmac
 import itertools
+import os
 import time
 from collections import deque
 from typing import Callable
 
 from ..crypto.e2e import SessionCrypto
-from ..crypto import webe2e
+from ..crypto import session_auth
+from ..logging_setup import get_logger
 from . import protocol as proto
+
+log = get_logger("server")
 
 # Outgoing send-queue priorities — lower sorts first (asyncio.PriorityQueue).
 # A large file/GIF broadcast to one client must never delay a chat/control
@@ -50,36 +54,41 @@ def _hash_password(password: str) -> str:
 class _PasswordThrottle:
     """Online-guessing brake for the session password.
 
-    Both join paths (native TCP and the browser gateway) used to accept an
-    unlimited stream of reconnect-and-guess attempts from anyone who knew the
-    onion address. Every failure now makes the next check wait longer (2, 4,
-    8, 16, then 30 s), and after MAX_FAILS failures inside WINDOW seconds
-    password joins are refused until old failures age out. Shared by both paths
-    so they cannot be played against each other.
+    Shared by both join paths (native TCP and the browser gateway) so they
+    cannot be played against each other. Checks run one at a time — opening
+    many connections at once does not let a guesser try passwords in parallel
+    — and after failures each check first waits 2, 4, 8, 16, then 30 s;
+    failures older than WINDOW are forgotten.
+
+    There is deliberately no hard lock-out. The previous version refused every
+    password join after 20 failures in 10 minutes, which let anyone who knew
+    the onion address keep the real participants out indefinitely by guessing
+    wrong 20 times every 10 minutes.
     """
 
     WINDOW = 600.0
-    MAX_FAILS = 20
 
     def __init__(self) -> None:
         self._fails: deque[float] = deque()
+        self._gate = asyncio.Lock()
+        self._sleep = asyncio.sleep          # replaced by the tests
 
-    def _prune(self) -> None:
-        now = time.monotonic()
-        while self._fails and now - self._fails[0] > self.WINDOW:
-            self._fails.popleft()
+    @staticmethod
+    def delay_for(failures: int) -> float:
+        return 0.0 if failures <= 0 else float(min(2 ** min(failures, 5), 30))
 
-    def locked(self) -> bool:
-        self._prune()
-        return len(self._fails) >= self.MAX_FAILS
-
-    def delay(self) -> float:
-        self._prune()
-        n = len(self._fails)
-        return 0.0 if n == 0 else float(min(2 ** min(n, 5), 30))
-
-    def failed(self) -> None:
-        self._fails.append(time.monotonic())
+    async def check(self, is_correct: Callable[[], bool]) -> bool:
+        """True if `is_correct()` says so; every wrong answer slows the next."""
+        async with self._gate:
+            now = time.monotonic()
+            while self._fails and now - self._fails[0] > self.WINDOW:
+                self._fails.popleft()
+            if self._fails:
+                await self._sleep(self.delay_for(len(self._fails)))
+            if is_correct():
+                return True
+            self._fails.append(time.monotonic())
+            return False
 
 
 class ChatServer:
@@ -89,24 +98,67 @@ class ChatServer:
         local_port: int,
         on_event: Callable[[dict], None],
         session_password: str = "",
+        onion_address: str = "",
     ) -> None:
         self._host_nick = host_nick
         self._local_port = local_port
         self._on_event = on_event
+        # v1 digest: still what old native clients and the browser page send.
         self._session_password_hash = _hash_password(session_password)
+        # v2 key (see crypto/session_auth.py): bound to this host's onion
+        # address, so it is derived once that address is known.
+        self._session_password = session_password
+        self._auth_key: bytes | None = None
+        if onion_address:
+            self.set_onion_address(onion_address)
         self._pw_throttle = _PasswordThrottle()
 
-        self._crypto = SessionCrypto()
-        self._crypto.generate_session_key()
 
         # nick → (reader, writer, per-conn crypto)
         self._clients: dict[str, tuple[asyncio.StreamReader, asyncio.StreamWriter, SessionCrypto]] = {}
+        # Every nick handed out in this session, native and web alike, kept
+        # after its owner leaves. A nick is the only identity the protocol has:
+        # clients accept a delete/edit/file chunk only from the nick that wrote
+        # the message or started the transfer, so a newcomer who could take a
+        # departed user's nick could edit and delete everything they wrote.
+        self._used_nicks: set[str] = {host_nick}
         self._server: asyncio.AbstractServer | None = None
 
         # Per-client outgoing queue + dedicated writer task — see _priority_for.
         self._client_queues: dict[str, asyncio.PriorityQueue] = {}
         self._client_writer_tasks: dict[str, asyncio.Task] = {}
         self._send_seq = itertools.count()
+
+    def set_onion_address(self, onion_address: str) -> None:
+        """The address clients reach this host at; their v2 proofs are bound
+        to it. Without it a v2 join cannot be verified and is refused."""
+        if self._session_password and session_auth.onion_id(onion_address):
+            self._auth_key = session_auth.auth_key(self._session_password, onion_address)
+
+    async def _password_ok(self, hello: dict, reader, writer) -> bool:
+        """Step 1b of the handshake, for a password-protected session.
+
+        A client that announces auth v2 gets a one-time challenge and answers
+        with a proof bound to this onion and to its own public key; nothing it
+        sends would open the session anywhere else. A client that does not
+        (older desktop / mobile builds) still sends the v1 digest, which is
+        accepted for compatibility — the browser page sends it too, and the
+        page comes from this host, so there it reveals nothing new.
+        """
+        if hello.get("auth") == session_auth.VERSION:
+            challenge = session_auth.new_challenge()
+            await proto.send_msg(writer, {"type": "challenge", "nonce": challenge})
+            answer = await asyncio.wait_for(proto.recv_msg(reader), timeout=60)
+            given = str(answer.get("proof", "")) if answer.get("type") == "auth" else ""
+            key = self._auth_key
+            if key is None:
+                log.warning("v2 join refused: this host's onion address is not set")
+            expected = session_auth.proof(key, challenge, str(hello.get("public_key", ""))) if key else None
+            return await self._pw_throttle.check(
+                lambda: expected is not None and hmac.compare_digest(given, expected))
+        given = str(hello.get("password_hash", ""))
+        return await self._pw_throttle.check(
+            lambda: hmac.compare_digest(given, self._session_password_hash))
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -132,8 +184,9 @@ class ChatServer:
                 writer.close()
             except Exception:
                 pass
+        for _, _, conn_crypto in self._clients.values():
+            conn_crypto.wipe()
         self._clients.clear()
-        self._crypto.wipe()
 
     # ------------------------------------------------------------------
     # Send helpers
@@ -238,14 +291,11 @@ class ChatServer:
         payload = proto.make_typing(self._host_nick, is_typing)
         await self._broadcast(payload)
 
-    def web_traffic_key(self) -> bytes:
-        """AES-GCM key shared by browser clients.
-
-        Derived from the group session key rather than being it: browsers have
-        no ChaCha20-Poly1305, so their traffic uses a different cipher, and the
-        same key bytes must not be handed to two of them.
-        """
-        return webe2e.derive_traffic_key(bytes(self._crypto._session_key))
+    @staticmethod
+    def web_traffic_key() -> bytes:
+        """A fresh AES-GCM key for one browser connection (audit H14): no
+        longer one key shared by every browser guest."""
+        return os.urandom(32)
 
     async def receive_web_chat(
         self,
@@ -326,14 +376,7 @@ class ChatServer:
 
             # Step 1b: password check (if session is protected)
             if self._session_password_hash:
-                if self._pw_throttle.locked():
-                    await proto.send_msg(writer, {"type": "auth_failed"})
-                    return
-                await asyncio.sleep(self._pw_throttle.delay())
-                if not hmac.compare_digest(
-                    str(hello.get("password_hash", "")), self._session_password_hash
-                ):
-                    self._pw_throttle.failed()
+                if not await self._password_ok(hello, reader, writer):
                     await proto.send_msg(writer, {"type": "auth_failed"})
                     return
 
@@ -343,21 +386,26 @@ class ChatServer:
             # the next "bob" became "bob_3" too) — overwriting that user's
             # entry, message queue and writer task, and letting the newcomer
             # speak under an identity nobody could tell apart. Probe until free.
-            if nick in self._clients or nick == self._host_nick:
-                base, n = nick, 2
-                while nick in self._clients or nick == self._host_nick:
-                    nick = f"{base}_{n}"
-                    n += 1
+            # Nicks of users who already left count as taken too (see
+            # _used_nicks): a returning user comes back as "bob_2".
+            nick = self.claim_nick(nick)
 
-            # Step 2: ECDH + wrap session key
-            wrapped = self._crypto.wrap_session_key(client_pub)
+            # Step 2: ECDH + wrap this connection's own key (audit H14).
+            # There used to be one group key for everybody, so a user who left
+            # or was kicked kept a key that still decrypted everyone else's
+            # traffic. The host decrypts every frame and re-encrypts it per
+            # recipient anyway, so each connection gets a key of its own
+            # (and a fresh host X25519 key): whoever leaves takes a key that
+            # opens nothing but their own past. Clients see no difference —
+            # they unwrap whatever key their welcome carries.
+            conn_crypto.generate_session_key()
+            wrapped = conn_crypto.wrap_session_key(client_pub)
             welcome = {
                 "type": "welcome",
-                "public_key": self._crypto.public_key_b64,
+                "public_key": conn_crypto.public_key_b64,
                 "nonce": wrapped["nonce"],
                 "ciphertext": wrapped["ciphertext"],
             }
-            conn_crypto.set_session_key(bytes(self._crypto._session_key))
             await proto.send_msg(writer, welcome)
 
             # Step 3: send current user list
@@ -418,9 +466,12 @@ class ChatServer:
                     return
 
                 elif msg_type == "panic":
+                    # A guest's panic takes that guest out, not the room: only
+                    # the host is told (as a notice); everyone else sees them
+                    # leave. Relaying it as "panic" made every other client
+                    # wipe and leave — any guest could end the session for all.
                     inner["nick"] = nick
                     self._on_event(inner)
-                    await self._broadcast(inner)
                     return
 
         except (asyncio.IncompleteReadError, ConnectionResetError, asyncio.TimeoutError):
@@ -450,6 +501,20 @@ class ChatServer:
             leave_payload = proto.make_leave(nick)
             self._on_event(leave_payload)
             await self._broadcast(leave_payload)
+
+    def claim_nick(self, wanted: str) -> str:
+        """Reserve a nick nobody has had in this session, based on `wanted`.
+
+        Shared with the web gateway, so native and browser users draw from one
+        pool. Synchronous on purpose: check-and-add cannot be interleaved by
+        another handshake on the event loop.
+        """
+        nick, n = wanted, 2
+        while nick in self._used_nicks or nick in self._clients:
+            nick = f"{wanted}_{n}"
+            n += 1
+        self._used_nicks.add(nick)
+        return nick
 
     @staticmethod
     def _sanitize_nick(nick: str) -> str:

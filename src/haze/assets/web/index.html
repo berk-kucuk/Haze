@@ -452,6 +452,12 @@ let ws = null, myNick = null, typingTimer = null, amTyping = false;
 let replyTo = null;                  // {nick, content} while composing a reply
 const mine = new Set();              // msg_ids sent from here (echo suppression)
 const rows = new Map();              // msg_id -> {row, blobUrl, timer}
+// msg_id -> author for the whole session (kept after a message disappears, so
+// an id is never reused): the host-stamped nick, or ME for what this page
+// sent. Only the author's delete/edit is applied. ME is not a nick on purpose:
+// a native user may be called exactly what was typed into the join form.
+const owners = new Map();
+const ME = Symbol("me");
 const transfers = new Map();         // file_id -> in-flight attachment
 const typers = new Set();
 
@@ -609,7 +615,8 @@ function refreshCount() {
 
 function messageRow(nick, msgId, opts) {
   const o = opts || {};
-  const isMine = nick === myNick;
+  // Only what this page sent is "mine" — never decided by comparing nicks.
+  const isMine = !!o.mine;
   const row = document.createElement("div");
   row.className = "row " + (isMine ? "me" : "ot");
   if (msgId) row.dataset.mid = msgId;
@@ -681,7 +688,10 @@ function messageRow(nick, msgId, opts) {
   feed.appendChild(row);
   const entry = rows.get(msgId) || {};
   entry.row = row;
-  if (msgId) rows.set(msgId, entry);
+  if (msgId) {
+    rows.set(msgId, entry);
+    if (!owners.has(msgId)) owners.set(msgId, isMine ? ME : nick);
+  }
   scrollDown(isMine);
   return row;
 }
@@ -742,7 +752,7 @@ function cancelReply() {
 
 function deleteOwn(msgId) {
   sendSecure({type: "delete", msg_id: msgId});
-  markDeleted(msgId);
+  markDeleted(msgId, ME);
 }
 
 /** Edit one of your own messages in place. */
@@ -756,10 +766,13 @@ function editOwn(msgId) {
   const text = next.trim();
   if (!text || text === current) return;
   sendSecure({type: "edit", msg_id: msgId, content: text});
-  markEdited(msgId, text);
+  markEdited(msgId, text, ME);
 }
 
-function markDeleted(msgId) {
+// `by` is the host-stamped nick of whoever asked (ME for this page): only the
+// message's author may delete or edit it.
+function markDeleted(msgId, by) {
+  if (owners.get(msgId) !== by) return;
   const entry = rows.get(msgId);
   if (!entry || !entry.row) return;
   if (entry.blobUrl) { URL.revokeObjectURL(entry.blobUrl); entry.blobUrl = null; }
@@ -770,7 +783,8 @@ function markDeleted(msgId) {
   if (acts) acts.remove();
 }
 
-function markEdited(msgId, content) {
+function markEdited(msgId, content, by) {
+  if (owners.get(msgId) !== by) return;
   const entry = rows.get(msgId);
   if (!entry || !entry.row) return;
   const bubble = entry.row.querySelector(".bubble");
@@ -794,6 +808,9 @@ function fileStart(d) {
   if (!id) return;
   // Our own upload comes back from the host; we already rendered it.
   if (mine.has(id)) return;
+  // The first sender keeps a file_id: a second file_start with the same id
+  // would otherwise take over someone's transfer in flight.
+  if (transfers.has(id)) return;
   // The wire field names are total_size / total_chunks (see protocol.py's
   // make_file_start). Reading "size"/"chunks" left both at 0, which quietly
   // disabled the caps below and the progress readout.
@@ -814,15 +831,20 @@ function fileStart(d) {
 
 function fileChunk(d) {
   const t = transfers.get(d.file_id);
-  if (!t) return;
+  // file_ids are visible to everyone: only the transfer's own sender may add
+  // to it, or anyone could splice content into someone else's file.
+  if (!t || d.nick !== t.nick) return;
+  // One slot per announced chunk, written once (first wins), like the
+  // native clients.
+  const idx = Number(d.chunk_index);
+  if (!Number.isInteger(idx) || idx < 0 || idx >= t.chunks || t.parts[idx]) return;
   let bin;
   try { bin = atob(String(d.data || "")); } catch (e) { return abortTransfer(d.file_id); }
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   t.bytes += bytes.length;
-  if (t.bytes > MAX_FILE_BYTES || t.parts.length >= MAX_FILE_CHUNKS) return abortTransfer(d.file_id);
-  const idx = Number(d.chunk_index);
-  t.parts[Number.isFinite(idx) ? idx : t.parts.length] = bytes;
+  if (t.bytes > MAX_FILE_BYTES) return abortTransfer(d.file_id);
+  t.parts[idx] = bytes;
   if (t.size) {
     const pct = Math.min(100, Math.round(t.bytes / t.size * 100));
     t.ph.textContent = "Receiving " + t.name + "… " + pct + "%";
@@ -840,9 +862,12 @@ function abortTransfer(id) {
 function fileEnd(d) {
   if (mine.has(d.file_id)) { mine.delete(d.file_id); return; }
   const t = transfers.get(d.file_id);
-  if (!t) return;
-  transfers.delete(d.file_id);
+  // Only the sender may finish (or, finishing early, truncate) it.
+  if (!t || d.nick !== t.nick) return;
   const parts = t.parts.filter(Boolean);
+  // A missing chunk would silently become a shorter, different file.
+  if (parts.length !== t.chunks) return abortTransfer(d.file_id);
+  transfers.delete(d.file_id);
   const blob = new Blob(parts, t.mime ? {type: t.mime} : undefined);
   const url = URL.createObjectURL(blob);
   const node = mediaNode(t.mime, t.name, blob.size, url);
@@ -919,7 +944,7 @@ async function sendFile(file) {
   mine.add(fileId);
   const url = URL.createObjectURL(new Blob([buf], {type: mime}));
   const node = mediaNode(mime, file.name, buf.length, url);
-  const row = messageRow(myNick, null, {node: node});
+  const row = messageRow(myNick, null, {node: node, mine: true});
   rows.set("file:" + fileId, {row: row, blobUrl: url});
 
   const bar = document.createElement("div");
@@ -1024,6 +1049,11 @@ function stopTyping() {
 
 function handle(d) {
   switch (d.type) {
+    case "joined":
+      // The nick the host actually gave this page ("[web]name", "_2" if
+      // taken); used for "(you)" in the list and to ignore our own typing.
+      if (typeof d.nick === "string" && d.nick) myNick = d.nick;
+      break;
     case "userlist":
       people.innerHTML = "";
       (d.users || []).forEach(addPerson);
@@ -1040,6 +1070,9 @@ function handle(d) {
     case "chat": {
       setTyping(d.nick, false);
       if (d.msg_id && mine.has(d.msg_id)) { mine.delete(d.msg_id); break; }
+      // A second message claiming a known msg_id would take over the edits
+      // and deletes of the one it copies.
+      if (d.msg_id && owners.has(d.msg_id)) break;
       messageRow(d.nick, d.msg_id, {
         text: String(d.content == null ? "" : d.content),
         replyNick: d.reply_to_nick, replyContent: d.reply_to_content,
@@ -1048,8 +1081,9 @@ function handle(d) {
       break;
     }
     case "typing": setTyping(d.nick, !!d.state); break;
-    case "delete": markDeleted(d.msg_id); break;
-    case "edit":   markEdited(d.msg_id, String(d.content == null ? "" : d.content)); break;
+    case "renewed": renewed(!!d.ok); break;
+    case "delete": markDeleted(d.msg_id, d.nick); break;
+    case "edit":   markEdited(d.msg_id, String(d.content == null ? "" : d.content), d.nick); break;
     case "file_start": fileStart(d); break;
     case "file_chunk": fileChunk(d); break;
     case "file_end":   fileEnd(d); break;
@@ -1167,6 +1201,7 @@ async function send() {
   }
   await sendSecure(payload);
   messageRow(myNick, msgId, {
+    mine: true,
     text: text,
     replyNick: replyTo ? replyTo.nick : null,
     replyContent: replyTo ? replyTo.content : null,
@@ -1242,26 +1277,29 @@ $("roster-btn").addEventListener("click", () => {
 $("roster-close").addEventListener("click", closeRoster);
 backdrop.addEventListener("click", closeRoster);
 
+// Asked over the encrypted socket, as a joined guest; the host answers with
+// "renewed" (see the message handler). It used to be an open HTTP endpoint.
 $("renew").addEventListener("click", async () => {
   const btn = $("renew"), note = $("renew-note");
   btn.disabled = true; btn.classList.add("spin"); note.textContent = "";
   try {
-    const r = await fetch("/api/renew", {method: "POST"});
-    if (r.ok) {
-      note.textContent = "Circuit renewed";
-      systemMsg("⟳ Tor circuit renewed — the session stayed up");
-    } else {
-      note.textContent = "Renewal unavailable";
-    }
+    await sendSecure({type: "renew"});
   } catch (e) {
     note.textContent = "Renewal failed";
-  } finally {
-    setTimeout(() => {
-      btn.disabled = false; btn.classList.remove("spin");
-      setTimeout(() => { note.textContent = ""; }, 3000);
-    }, 1100);
   }
+  setTimeout(() => { btn.disabled = false; btn.classList.remove("spin"); }, 1100);
 });
+
+function renewed(ok) {
+  const note = $("renew-note");
+  if (ok) {
+    note.textContent = "Circuit renewed";
+    systemMsg("⟳ Tor circuit renewed — the session stayed up");
+  } else {
+    note.textContent = "Not now — try again in a little while";
+  }
+  setTimeout(() => { note.textContent = ""; }, 3000);
+}
 </script>
 </body>
 </html>

@@ -54,6 +54,7 @@ profile haze /usr/bin/haze flags=(complain) {
   @{HAZE_APP}/{,**} r,
   /usr/share/pixmaps/haze.png r,
   /usr/share/icons/hicolor/*/apps/haze.png r,
+  /usr/share/icons/hicolor/scalable/apps/haze.svg r,
   @{PROC}/@{pid}/{stat,status,cmdline,mounts,fd/} r,
   @{sys}/devices/system/cpu/{,**} r,
 

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Haze</title>
+  <!-- Haze, small-size cut (48 px and below): heavier strokes and tighter
+       spacing so the letters survive at panel and menu sizes.
+       The HAZE wordmark on the Maze tile. Monoline letters on a square
+       grid, one stroke weight and one corner radius throughout. -->
+  <defs>
+    <radialGradient id="hz-glow" cx="512" cy="512" r="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.20"/>
+      <stop offset="0.45" stop-color="#ffffff" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="hz-lit" x1="0" y1="407.35" x2="0" y2="616.65" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#cfcfd8"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="220" fill="#000"/>
+  <circle cx="512" cy="512" r="420" fill="url(#hz-glow)"/>
+  <path d="M88.16499999999999 407.35 V616.6500000000001 M245.13500000000002 407.35 V616.6500000000001 M88.16499999999999 512.0 H245.13500000000002 M318.3952325581396 616.6500000000001 V459.68000000000006 A26.165 26.165 0 0 1 344.5602325581396 433.51500000000004 H449.20023255813953 A26.165 26.165 0 0 1 475.36523255813955 459.68000000000006 V616.6500000000001 M318.3952325581396 512.0 H475.36523255813955 M522.4604651162791 433.51500000000004 H661.1149651162792 Q705.5954651162792 433.51500000000004 674.14 464.97 L580.08 559.03 Q548.6254651162791 590.4850000000001 593.1059651162791 590.4850000000001 H731.7604651162792 M961.9906976744187 433.51500000000004 H805.0206976744187 A26.165 26.165 0 0 0 778.8556976744187 459.68000000000006 V564.3200000000002 A26.165 26.165 0 0 0 805.0206976744187 590.4850000000001 H961.9906976744187 M778.8556976744187 512.0 H961.9906976744187" fill="none" stroke="url(#hz-lit)" stroke-width="52.33" stroke-linecap="butt" stroke-linejoin="miter"/>
+</svg>

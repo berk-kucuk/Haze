@@ -1,11 +1,11 @@
 # Maintainer: Berk Kucuk <berkkucukk@proton.me>
 pkgname=haze
 pkgver=2.12.2
-pkgrel=1
+pkgrel=3
 pkgdesc="Anonymous encrypted P2P chat over the Tor network — for Maze Linux"
-arch=('x86_64')
+arch=('any')
 url="https://github.com/berk-kucuk/Haze"
-license=('GPL-3.0-only')
+license=('AGPL-3.0-only')
 # Python libraries (PyQt6, stem, cryptography, aiohttp, sounddevice, …) come
 # from maze-python, the shared Maze venv at /opt/maze/venv. This package ships
 # only its own source tree and runs it with that interpreter.
@@ -50,13 +50,17 @@ EOF
     install -Dm644 "${_src}/installer/haze.desktop" \
         "${pkgdir}/usr/share/applications/${pkgname}.desktop"
 
-    # Icons — pixmaps and hicolor at all standard sizes
+    # Icons — each hicolor size gets its own rendering (16–48 px use the
+    # heavier small-size cut, so the wordmark stays legible), plus the
+    # scalable SVG and a pixmaps fallback.
     install -Dm644 "${_src}/src/haze/assets/logo.png" \
         "${pkgdir}/usr/share/pixmaps/${pkgname}.png"
-    for _size in 16 22 32 48 64 128 256; do
-        install -Dm644 "${_src}/src/haze/assets/logo.png" \
+    for _size in 16 22 24 32 48 64 128 256 512; do
+        install -Dm644 "${_src}/src/haze/assets/icons/haze-${_size}.png" \
             "${pkgdir}/usr/share/icons/hicolor/${_size}x${_size}/apps/${pkgname}.png"
     done
+    install -Dm644 "${_src}/src/haze/assets/icons/haze.svg" \
+        "${pkgdir}/usr/share/icons/hicolor/scalable/apps/${pkgname}.svg"
 
     # License
     if [[ -f "${_src}/LICENSE" ]]; then

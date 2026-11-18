@@ -47,7 +47,7 @@ def main() -> None:
     log_path = setup_logging()
     log = get_logger()
     log.info("──────── Haze %s starting ────────", _app_version())
-    print(f"[haze] v{_app_version()} — logging to {log_path}", file=sys.stderr)
+    print(f"[haze] v{_app_version()} — logging to {log_path or 'stderr only'}", file=sys.stderr)
     _install_excepthook()
 
     QApplication.setHighDpiScaleFactorRoundingPolicy(

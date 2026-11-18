@@ -87,8 +87,8 @@ Native client               Host (hidden service)           Tor Browser client
 
 Each native TCP connection performs a one-pass ECDH key exchange with optional password authentication:
 
-1. **Client → Host**: `hello` — X25519 public key, nickname, SHA-256 password hash
-2. **Host**: verifies password hash if a session password is set; sends `auth_failed` and closes on mismatch
+1. **Client → Host**: `hello` — X25519 public key, nickname
+2. **Host**: if a session password is set, sends a one-time `challenge`; the client answers with a proof bound to the challenge, its own key and the host's onion address; `auth_failed` and close on mismatch
 3. **Host → Client**: `welcome` — host public key and session key wrapped under the ECDH-derived key
 4. **Host → Client**: encrypted `userlist` of currently connected participants
 5. **Host → All**: encrypted `join` broadcast
@@ -97,9 +97,9 @@ The session key is a 32-byte random value generated once per host instance. It i
 
 Key derivation uses HKDF-SHA256 with the info string `haze-protocol-v1`. All subsequent messages are encrypted with ChaCha20-Poly1305 using per-message random 12-byte nonces.
 
-Password hashing uses SHA-256 with a fixed prefix: `SHA-256("haze-session-v1:" + password)`. The hash is sent in the `hello` message; the plaintext password never leaves the client.
+Password proof (auth v2): `key = PBKDF2-HMAC-SHA256(password, "haze-auth-v2:" + onion, 200 000)`, `proof = HMAC-SHA256(key, "haze-auth-v2|" + challenge + "|" + client public key)`. Neither the password nor anything reusable leaves the client: an answer given to a lookalike onion address does not open the real session, and cracking it offline costs 200 000 PBKDF2 rounds per guess. Hosts still accept the older `SHA-256("haze-session-v1:" + password)` digest from clients that predate v2.
 
-Web clients (Tor Browser) authenticate through the WebSocket `join` event using the same hash computed via the Web Crypto API.
+Web clients (Tor Browser) authenticate through the WebSocket `join` event using that older digest computed via the Web Crypto API. The page itself is served by the host, so a challenge would protect nothing there: a fake host would simply serve a page that reads the password.
 
 ### Wire protocol
 

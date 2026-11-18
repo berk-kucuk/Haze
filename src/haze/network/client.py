@@ -4,13 +4,13 @@ Join-mode asyncio client. Connects to host via Tor SOCKS5.
 
 import asyncio
 import base64
-import hashlib
 import itertools
 import time
 from typing import Callable
 
 from python_socks.async_.asyncio import Proxy
 
+from ..crypto import session_auth
 from ..crypto.e2e import SessionCrypto
 from . import protocol as proto
 from ..logging_setup import get_logger, redact
@@ -31,12 +31,6 @@ _PRIO_FILE = 1      # file_start / file_chunk / file_end
 _SHUTDOWN = object()
 
 
-def _hash_password(password: str) -> str:
-    if not password:
-        return ""
-    return hashlib.sha256(b"haze-session-v1:" + password.encode()).hexdigest()
-
-
 class ChatClient:
     def __init__(
         self,
@@ -50,7 +44,11 @@ class ChatClient:
         self._onion_host = onion_host.strip().rstrip("/")
         self._socks_port = socks_port
         self._on_event = on_event
-        self._password_hash = _hash_password(session_password)
+        # Never the password, and no longer its v1 digest: a v2 proof is
+        # computed per challenge (see crypto/session_auth.py). The key is
+        # derived on first use and kept for reconnects.
+        self._session_password = session_password
+        self._auth_key: bytes | None = None
 
         self._crypto = SessionCrypto()
         self._writer: asyncio.StreamWriter | None = None
@@ -111,11 +109,26 @@ class ChatClient:
             "type": "hello",
             "public_key": self._crypto.public_key_b64,
             "nick": self._nick,
-            "password_hash": self._password_hash,
+            "auth": session_auth.VERSION,
         })
 
         log.info("SOCKS connected, hello sent; awaiting welcome")
         response = await asyncio.wait_for(proto.recv_msg(reader), timeout=60)
+        if response.get("type") == "challenge":
+            # The host wants the session password. Without one there is
+            # nothing to prove; with one, answer for THIS onion only.
+            if not self._session_password:
+                response = {"type": "auth_failed"}
+            else:
+                if self._auth_key is None:
+                    self._auth_key = await asyncio.to_thread(
+                        session_auth.auth_key, self._session_password, self._onion_host)
+                await proto.send_msg(writer, {
+                    "type": "auth",
+                    "proof": session_auth.proof(self._auth_key, str(response.get("nonce", "")),
+                                                self._crypto.public_key_b64),
+                })
+                response = await asyncio.wait_for(proto.recv_msg(reader), timeout=120)
         if response.get("type") == "auth_failed":
             log.warning("handshake: auth_failed (wrong session password)")
             self._on_event({"type": "auth_failed"})

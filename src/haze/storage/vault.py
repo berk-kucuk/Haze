@@ -28,13 +28,20 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 _VAULT_DIR = Path.home() / ".config" / "haze" / "vault"
 _SALT_FILE = _VAULT_DIR / ".salt"
 
+# Fixed salts of the older schemes. Being the same on every installation,
+# they let one precomputed table attack every Haze user's lock at once (audit
+# H8); new hashes carry a random salt of their own and these are only read.
 _LOCK_SALT  = b"haze_vault_lock_v1"
 _DECOY_SALT = b"haze_vault_decoy_v1"
 
 # Marks a vault file whose key came from scrypt. Legacy files begin with a raw
 # 12-byte nonce, so the prefix is what tells the two apart.
 _MAGIC_V2 = b"HZV2"
-# Marks a lock/decoy hash produced by scrypt; a bare hex string is legacy.
+# Lock/decoy hash formats, newest first:
+#   "scrypt2$<salt hex>$<hash hex>"  scrypt, random per-hash salt (current)
+#   "scrypt$<hash hex>"              scrypt, fixed salt (legacy, read-only)
+#   "<hash hex>"                     PBKDF2, fixed salt (legacy, read-only)
+_SALTED_PREFIX = "scrypt2$"
 _SCRYPT_PREFIX = "scrypt$"
 
 # 32 MiB, ~100 ms per guess. Kept identical on Android (VaultStore.kt) so both
@@ -44,12 +51,39 @@ _SCRYPT_R = 8
 _SCRYPT_P = 1
 
 
+def _private_dir() -> None:
+    """The vault directory, owner-only (audit H13: it used to get the default
+    umask, usually 0755, with its files at 0644 — while settings.json next
+    door was already 0600). Tightened on every use, so an older vault gets
+    fixed too."""
+    _VAULT_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(_VAULT_DIR, 0o700)
+    for f in _VAULT_DIR.iterdir():
+        if f.is_file() and not f.is_symlink():
+            os.chmod(f, 0o600)
+
+
+def _write_private(path: Path, data: bytes) -> None:
+    """Write `data` to `path`, 0600 from the first byte, replaced atomically."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _get_or_create_salt() -> bytes:
-    _VAULT_DIR.mkdir(parents=True, exist_ok=True)
+    _private_dir()
     if _SALT_FILE.exists():
         return _SALT_FILE.read_bytes()
     salt = os.urandom(32)
-    _SALT_FILE.write_bytes(salt)
+    _write_private(_SALT_FILE, salt)
     return salt
 
 
@@ -85,20 +119,37 @@ def _pbkdf2_hex(password: str, salt: bytes) -> str:
 # Lock / decoy helpers (used by settings UI)
 # ------------------------------------------------------------------
 
+def _salted_hash(password: str, role: bytes) -> str:
+    # The role's fixed salt goes in front of the random one, so a lock hash
+    # can never pass as a decoy hash or the other way round.
+    salt = os.urandom(16)
+    return f"{_SALTED_PREFIX}{salt.hex()}${_derive_key(password, role + salt).hex()}"
+
+
 def make_lock_hash(password: str) -> str:
-    return _scrypt_hex(password, _LOCK_SALT)
+    return _salted_hash(password, _LOCK_SALT)
 
 def make_decoy_hash(password: str) -> str:
-    return _scrypt_hex(password, _DECOY_SALT)
+    return _salted_hash(password, _DECOY_SALT)
 
 
 def _matches(password: str, stored_hash: str, salt: bytes) -> bool:
-    """Compare against either hash scheme, in constant time.
+    """Compare against any of the hash schemes, in constant time.
 
-    Constant time because a plain `==` on hex strings leaks how many leading
-    characters matched, which is enough to reconstruct the stored digest one
-    character at a time.
+    `salt` is the role's fixed salt: the whole salt of the legacy schemes, the
+    prefix of a current hash's own random one. Constant time because a plain `==` on hex strings leaks how many
+    leading characters matched, which is enough to reconstruct the stored
+    digest one character at a time.
     """
+    if stored_hash.startswith(_SALTED_PREFIX):
+        try:
+            salt_hex, digest = stored_hash[len(_SALTED_PREFIX):].split("$", 1)
+            own_salt = bytes.fromhex(salt_hex)
+        except ValueError:
+            return False
+        if not own_salt:
+            return False
+        return hmac.compare_digest(_derive_key(password, salt + own_salt).hex(), digest)
     if stored_hash.startswith(_SCRYPT_PREFIX):
         return hmac.compare_digest(_scrypt_hex(password, salt), stored_hash)
     return hmac.compare_digest(_pbkdf2_hex(password, salt), stored_hash)
@@ -118,12 +169,12 @@ def check_decoy(password: str, stored_hash: str) -> bool:
 
 
 def is_legacy_hash(stored_hash: str) -> bool:
-    """True for a lock/decoy hash still using the old PBKDF2 scheme.
+    """True for a lock/decoy hash in one of the fixed-salt schemes.
 
     Callers re-save the upgraded hash after a successful unlock, when the
     password is in hand — see MainWindow's vault unlock path.
     """
-    return bool(stored_hash) and not stored_hash.startswith(_SCRYPT_PREFIX)
+    return bool(stored_hash) and not stored_hash.startswith(_SALTED_PREFIX)
 
 
 # ------------------------------------------------------------------
@@ -164,7 +215,7 @@ def save_session(password: str, session_name: str, messages: list, participants:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_name = "".join(c for c in session_name if c.isalnum() or c in "_- ")[:20].strip()
     filename = f"{ts}_{safe_name or 'session'}.hzv"
-    (_VAULT_DIR / filename).write_bytes(_MAGIC_V2 + nonce + ct)
+    _write_private(_VAULT_DIR / filename, _MAGIC_V2 + nonce + ct)
 
 
 def load_session(password: str, path: str) -> dict:

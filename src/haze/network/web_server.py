@@ -10,13 +10,15 @@ to/from native TCP clients transparently.
 
 Extra HTTP routes:
   GET  /logo.png   — the Haze wordmark used by the page
-  POST /api/renew  — rotate Tor circuits (NEWNYM) without dropping sessions
+  WS "renew"       — rotate Tor circuits (NEWNYM) without dropping sessions
+                     (joined guests only, at most once per RENEW_INTERVAL)
 """
 
 import asyncio
 import hashlib
 import hmac
 import json
+import time
 import uuid as _uuid
 from pathlib import Path
 from typing import Callable
@@ -26,6 +28,9 @@ from aiohttp import web, WSMsgType
 from ..crypto import webe2e
 from . import protocol as proto
 from .server import ChatServer
+from ..logging_setup import get_logger
+
+log = get_logger("web")
 
 # The page is a real file rather than a string literal because the Android
 # client serves the very same bytes from its assets/web/ directory. Keeping one
@@ -68,13 +73,42 @@ def _read_page() -> str:
 _HTML = _read_page()
 
 
+def _csp_hashes(html: str, tag: str) -> str:
+    import base64
+    import re
+    return " ".join(
+        "'sha256-" + base64.b64encode(hashlib.sha256(body.encode()).digest()).decode() + "'"
+        for body in re.findall(rf"<{tag}>(.*?)</{tag}>", html, re.S))
+
+
+# Sent with the page (audit H10). The page's own <meta> policy has to allow
+# 'unsafe-inline' and cannot forbid framing; this header names the exact
+# inline script and style by hash instead, and adds what a meta tag cannot.
+# A browser applies both policies, so the stricter one wins.
+_PAGE_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; img-src 'self' blob:; media-src blob:; "
+        f"script-src {_csp_hashes(_HTML, 'script')}; style-src {_csp_hashes(_HTML, 'style')}; "
+        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"),
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+
+#: Seconds between two circuit renewals requested from the page. Tor itself
+#: refuses NEWNYM more often than every 10 s.
+RENEW_INTERVAL = 30.0
+
+
 class WebChatServer:
     """
     Bridges Tor Browser ↔ native Haze clients.
 
     - Serves the HTML chat UI on GET /
     - Accepts WebSocket connections on GET /ws
-    - POST /api/renew  → rotate Tor circuits via renew_circuit_cb (NEWNYM)
+    - WS {"type": "renew"} → rotate Tor circuits via renew_circuit_cb (NEWNYM),
+      only for a guest who has joined, and not more than once per RENEW_INTERVAL
     - Events from TCP/host path reach web clients via broadcast_event()
     - Messages from web clients are forwarded to ChatServer and Qt via
       ChatServer.receive_web_chat / receive_web_typing
@@ -96,8 +130,11 @@ class WebChatServer:
         self._qt_callback = qt_callback
         self._loop = loop
         self._renew_circuit_cb = renew_circuit_cb
+        self._last_renew = -RENEW_INTERVAL
         self._session_password_hash = _hash_password(session_password)
         self._ws_clients: dict[str, web.WebSocketResponse] = {}
+        # Each browser connection's own traffic key (audit H14), by nick.
+        self._ws_keys: dict[str, bytes] = {}
         self._runner: web.AppRunner | None = None
 
     # ------------------------------------------------------------------
@@ -109,7 +146,6 @@ class WebChatServer:
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/logo.png", self._handle_logo)
         app.router.add_get("/ws", self._handle_ws)
-        app.router.add_post("/api/renew", self._handle_renew)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, "127.0.0.1", self._http_port)
@@ -125,7 +161,7 @@ class WebChatServer:
     # ------------------------------------------------------------------
 
     async def _handle_index(self, request: web.Request) -> web.Response:
-        return web.Response(text=_HTML, content_type="text/html")
+        return web.Response(text=_HTML, content_type="text/html", headers=_PAGE_HEADERS)
 
     async def _handle_logo(self, request: web.Request) -> web.Response:
         """The wordmark shown on the join card and in the top bar.
@@ -143,14 +179,24 @@ class WebChatServer:
             headers={"Cache-Control": "public, max-age=86400"},
         )
 
-    async def _handle_renew(self, request: web.Request) -> web.Response:
-        if self._renew_circuit_cb is None:
-            return web.Response(status=503, text="Circuit renewal not available")
+    def _renew(self) -> bool:
+        """Rotate the host's Tor circuits for a joined guest (audit H9).
+
+        This used to be POST /api/renew, open to anyone who knew the onion
+        address — no password, no join — and it answered with the exception
+        text. Now it is a message on a guest's encrypted socket, rate-limited
+        for everyone together, and a failure is only "no".
+        """
+        now = time.monotonic()
+        if self._renew_circuit_cb is None or now - self._last_renew < RENEW_INTERVAL:
+            return False
+        self._last_renew = now
         try:
             self._renew_circuit_cb()
-            return web.Response(text="ok")
+            return True
         except Exception as exc:
-            return web.Response(status=500, text=str(exc))
+            log.warning("circuit renewal failed: %r", exc)
+            return False
 
     # ------------------------------------------------------------------
     # WebSocket handler
@@ -215,23 +261,21 @@ class WebChatServer:
                         # Password check before admitting
                         if self._session_password_hash:
                             # Same brake as the native path (shared state).
-                            throttle = self._chat_server._pw_throttle
-                            if throttle.locked():
-                                await send({"type": "auth_failed"})
-                                await ws.close()
-                                return ws
-                            await asyncio.sleep(throttle.delay())
-                            if not hmac.compare_digest(
-                                str(data.get("password_hash", "")),
-                                self._session_password_hash,
+                            given = str(data.get("password_hash", ""))
+                            if not await self._chat_server._pw_throttle.check(
+                                lambda: hmac.compare_digest(given, self._session_password_hash)
                             ):
-                                throttle.failed()
                                 await send({"type": "auth_failed"})
                                 await ws.close()
                                 return ws
 
                         nick = self._make_nick(data.get("nick", ""), prefix="[web]")
                         self._ws_clients[nick] = ws
+                        self._ws_keys[nick] = traffic_key
+                        # Tell the page which nick it actually got ("[web]…",
+                        # with a suffix if taken), so it can tell itself apart
+                        # from a native user of the same name.
+                        await send({"type": "joined", "nick": nick})
 
                         # Send current user list to newcomer
                         users = (
@@ -260,6 +304,9 @@ class WebChatServer:
                             reply_to_nick=str(reply_nick)[:20] if reply_nick else None,
                             reply_to_content=str(reply_content)[:200] if reply_content else None,
                         )
+
+                    elif mtype == "renew" and nick is not None:
+                        await send({"type": "renewed", "ok": self._renew()})
 
                     elif mtype == "typing" and nick is not None:
                         await self._chat_server.receive_web_typing(nick, bool(data.get("state")))
@@ -292,6 +339,7 @@ class WebChatServer:
         finally:
             if nick and nick in self._ws_clients:
                 del self._ws_clients[nick]
+                self._ws_keys.pop(nick, None)
                 leave_ev = {"type": "leave", "nick": nick}
                 self._qt_callback(leave_ev)
                 await self._chat_server._broadcast(leave_ev)
@@ -382,22 +430,21 @@ class WebChatServer:
     async def _broadcast_web(self, payload: dict, exclude: str | None = None) -> None:
         if not self._ws_clients:
             return
-        # Browser clients share one traffic key, so the envelope is built once
-        # and the same ciphertext goes to every one of them.
-        try:
-            envelope = webe2e.encrypt(self._chat_server.web_traffic_key(), payload)
-        except Exception:
-            return
+        # Each browser has a key of its own, so each gets its own envelope.
         dead = []
         for nick, ws in list(self._ws_clients.items()):
             if nick == exclude:
                 continue
+            key = self._ws_keys.get(nick)
+            if key is None:
+                continue
             try:
-                await ws.send_json(envelope)
+                await ws.send_json(webe2e.encrypt(key, payload))
             except Exception:
                 dead.append(nick)
         for nick in dead:
             self._ws_clients.pop(nick, None)
+            self._ws_keys.pop(nick, None)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -406,9 +453,6 @@ class WebChatServer:
     def _make_nick(self, raw: str, prefix: str = "") -> str:
         sanitized = "".join(c for c in raw if c in _ALLOWED_NICK)[:20]
         base = prefix + (sanitized or "user")
-        taken = set(self._ws_clients) | set(self._chat_server._clients) | {self._host_nick}
-        nick, i = base, 2
-        while nick in taken:
-            nick = f"{base}_{i}"
-            i += 1
-        return nick
+        # One pool with the native clients, including nicks of users who have
+        # left: see ChatServer._used_nicks.
+        return self._chat_server.claim_nick(base)

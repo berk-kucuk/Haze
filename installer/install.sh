@@ -241,10 +241,14 @@ if [[ -f "$ICON_SRC" ]]; then
     echo -e "${CYAN}Installing icon...${NC}"
     # pixmaps — many DEs read this without any cache
     cp "$ICON_SRC" "$PIXMAP_DIR/$APP.png"
-    # hicolor at all common sizes
-    for size in 16 22 32 48 64 128 256; do
-        cp "$ICON_SRC" "$HICOLOR_DIR/${size}x${size}/apps/$APP.png"
+    # hicolor: each size its own rendering (16–48 px use the small-size cut)
+    for size in 16 22 24 32 48 64 128 256 512; do
+        mkdir -p "$HICOLOR_DIR/${size}x${size}/apps"
+        cp "$PROJECT_DIR/src/haze/assets/icons/haze-${size}.png" \
+           "$HICOLOR_DIR/${size}x${size}/apps/$APP.png"
     done
+    mkdir -p "$HICOLOR_DIR/scalable/apps"
+    cp "$PROJECT_DIR/src/haze/assets/icons/haze.svg" "$HICOLOR_DIR/scalable/apps/$APP.svg"
     echo -e "  icon ${GREEN}✓${NC}"
 else
     echo -e "  icon not found — skipping"
